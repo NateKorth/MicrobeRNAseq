@@ -13,6 +13,8 @@ git clone git@github.com:NateKorth/MicrobeRNAseq.git
 The following can be installed to a conda environment with the command conda install
 * ncbi-genome-download
 * hisat2
+* ribodetector
+* DEseq2
 * Kraken2
 * eggNog-mapper
 
@@ -21,11 +23,20 @@ The human genome can be found here: https://www.ncbi.nlm.nih.gov/datasets/taxono
 
 The Maize reference genome can be found here (Get both the genome and gff annotation file): https://www.maizegdb.org/assembly
 
-# Step1 Trim/QC with fastqc and trimmomatic
+## Step 1 Trim/QC with fastqc and trimmomatic
 
-# Step 2 Align reads to human genome and remove from downstream analysis
+## Step 2 Align reads to human genome and remove from downstream analysis
 
-# Step 3 Align reads to maize genome
+## Step 3 Remove rRNA reads
+
+## Step 4 Align reads to maize genome
+
+## Step 4a Process maize reads
+Calculate tpm
+
+Conduct DEseq
+
+## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads
 
 ## Contact
 For clarification on code missing annotation contact:
