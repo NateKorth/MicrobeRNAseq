@@ -16,9 +16,16 @@ The following can be installed to a conda environment with the command conda ins
 * Kraken2
 * eggNog-mapper
 
-## Step1 Download Required Genomes
+## Step0 Download Required Genomes
 The human genome can be found here: https://www.ncbi.nlm.nih.gov/datasets/taxonomy/9606/
-The Maize reference genome can be found here: 
+
+The Maize reference genome can be found here (Get both the genome and gff annotation file): https://www.maizegdb.org/assembly
+
+# Step1 Trim/QC with fastqc and trimmomatic
+
+# Step 2 Align reads to human genome and remove from downstream analysis
+
+# Step 3 Align reads to maize genome
 
 ## Contact
 For clarification on code missing annotation contact:
