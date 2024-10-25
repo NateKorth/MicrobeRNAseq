@@ -14,6 +14,7 @@ The following can be installed to a conda environment with the command conda ins
 * ncbi-genome-download
 * fastqc
 * hisat2
+* pytorch
 * ribodetector
 * DEseq2
 * Kraken2
@@ -140,6 +141,34 @@ gzip -cd ./Zm-B73-REFERENCE-NAM-5.0.fa.gz > B73Refv5.fa
 hisat2-build -p 16 B73Refv5.fa B73Index
 # now that the index is built, remove the unzipped fasta file to save space:
 rm BB73Refv5.fa
+
+# Loop over all fastq files in the input directory
+#for fastq_F in "${input_dir}"/*humanremoved_F.fastq; do
+    #Derive Reverse Read
+#    fastq_R=${fastq_F/humanremoved_F.fastq/humanremoved_R.fastq}
+#    Name=$(basename "${fastq_F}" _humanremoved_F.fastq)
+
+    # Run HISAT2
+#    hisat2 -p 32 -x "${maize_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Name}_mapped2maize.sam"
+
+    # Sort the SAM file and convert to BAM
+#    samtools sort -n -o "./Output/${Name}_mapped2maize.sorted.bam" "./Output/${Name}_mapped2maize.sam" -@ 32
+
+    # Extract mapped reads
+#    samtools view -b -F 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_mapped2maize.sorted1.bam" -@ 32
+
+    # Convert BAM to FASTQ
+#    samtools bam2fq "./Output/${Name}_mapped2maize.sorted1.bam" > "./Output/${Name}_mapped2maize.fastq" -@ 32
+#    #samtools bam2fq -n "./Output/${Name}_mapped2maize.sorted.bam" -1 "./Output/${Name}_mapped2maize_F.fastq" -2 "./Output/${Name}_mapped2maize_R.fastq"
+#    bedtools bamtofastq -i "./Output/${Name}_mapped2maize.sorted1.bam" -fq "./Output/${Name}_mapped2maize_F.fastq" -fq2 "./Output/${Name}_mapped2maize_R.fastq"
+
+    # Extract unmapped reads
+#    samtools view -b -f 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_maizeremoved.bam" -@ 32
+
+    # Convert BAM to FASTQ
+#    #samtools bam2fq "./Output/${Name}_maizeremoved.bam" > "./Output/${Name}_maizeremoved.fastq" --threads 32
+#    bedtools bamtofastq -i "./Output/${Name}_maizeremoved.bam" -fq "./Output/${Name}_maizeremoved_F.fastq" -fq2 "./Output/${Name}_maizeremoved_R.fastq"
+#done
 ```
 ## Step 4a Process maize reads
 Calculate tpm
