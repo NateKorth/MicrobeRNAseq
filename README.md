@@ -120,7 +120,7 @@ If possible do this step on a gpu, at NCstate the header looks like this:
 #BSUB -e err.%J
 ```
 Ribodetetctor is a deep learning method to identify rRNA, read more about it and how to install it as a conda environment here: https://github.com/hzi-bifo/RiboDetector
-'''
+```
 conda activate /usr/local/usrapps/gage/njkorth/ribodetect
 
 #Loops to run ribodetector on all fastq files in Output Folder:
@@ -133,7 +133,7 @@ for fastq_F in ./Output/*humanremoved_F.fastq; do
     ribodetector -l 151 -t 2  -i "${fastq_F}" "${fastq_R}" -m 20  -e rrna -o "./Output/${Name}_riboremoved_F.fastq" "./Output/${Name}_riboremoved_R.fastq" --log "${Name}_log.txt"
 done
 
-'''
+```
 ## Step 4 Align reads to maize genome
 ```
 # Build Maize Index:
@@ -143,36 +143,38 @@ hisat2-build -p 16 B73Refv5.fa B73Index
 rm BB73Refv5.fa
 
 # Loop over all fastq files in the input directory
-#for fastq_F in "${input_dir}"/*humanremoved_F.fastq; do
+for fastq_F in "${input_dir}"/*humanremoved_F.fastq; do
     #Derive Reverse Read
-#    fastq_R=${fastq_F/humanremoved_F.fastq/humanremoved_R.fastq}
-#    Name=$(basename "${fastq_F}" _humanremoved_F.fastq)
+    fastq_R=${fastq_F/humanremoved_F.fastq/humanremoved_R.fastq}
+    Name=$(basename "${fastq_F}" _humanremoved_F.fastq)
 
     # Run HISAT2
-#    hisat2 -p 32 -x "${maize_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Name}_mapped2maize.sam"
+    hisat2 -p 32 -x "${maize_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Name}_mapped2maize.sam"
 
     # Sort the SAM file and convert to BAM
-#    samtools sort -n -o "./Output/${Name}_mapped2maize.sorted.bam" "./Output/${Name}_mapped2maize.sam" -@ 32
+    samtools sort -n -o "./Output/${Name}_mapped2maize.sorted.bam" "./Output/${Name}_mapped2maize.sam" -@ 32
 
     # Extract mapped reads
-#    samtools view -b -F 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_mapped2maize.sorted1.bam" -@ 32
+    samtools view -b -F 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_mapped2maize.sorted1.bam" -@ 32
 
     # Convert BAM to FASTQ
-#    samtools bam2fq "./Output/${Name}_mapped2maize.sorted1.bam" > "./Output/${Name}_mapped2maize.fastq" -@ 32
-#    #samtools bam2fq -n "./Output/${Name}_mapped2maize.sorted.bam" -1 "./Output/${Name}_mapped2maize_F.fastq" -2 "./Output/${Name}_mapped2maize_R.fastq"
-#    bedtools bamtofastq -i "./Output/${Name}_mapped2maize.sorted1.bam" -fq "./Output/${Name}_mapped2maize_F.fastq" -fq2 "./Output/${Name}_mapped2maize_R.fastq"
+    samtools bam2fq "./Output/${Name}_mapped2maize.sorted1.bam" > "./Output/${Name}_mapped2maize.fastq" -@ 32
+    #samtools bam2fq -n "./Output/${Name}_mapped2maize.sorted.bam" -1 "./Output/${Name}_mapped2maize_F.fastq" -2 "./Output/${Name}_mapped2maize_R.fastq"
+    bedtools bamtofastq -i "./Output/${Name}_mapped2maize.sorted1.bam" -fq "./Output/${Name}_mapped2maize_F.fastq" -fq2 "./Output/${Name}_mapped2maize_R.fastq"
 
     # Extract unmapped reads
-#    samtools view -b -f 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_maizeremoved.bam" -@ 32
+    samtools view -b -f 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_maizeremoved.bam" -@ 32
 
     # Convert BAM to FASTQ
-#    #samtools bam2fq "./Output/${Name}_maizeremoved.bam" > "./Output/${Name}_maizeremoved.fastq" --threads 32
-#    bedtools bamtofastq -i "./Output/${Name}_maizeremoved.bam" -fq "./Output/${Name}_maizeremoved_F.fastq" -fq2 "./Output/${Name}_maizeremoved_R.fastq"
-#done
+    #samtools bam2fq "./Output/${Name}_maizeremoved.bam" > "./Output/${Name}_maizeremoved.fastq" --threads 32
+    bedtools bamtofastq -i "./Output/${Name}_maizeremoved.bam" -fq "./Output/${Name}_maizeremoved_F.fastq" -fq2 "./Output/${Name}_maizeremoved_R.fastq"
+done
 ```
 ## Step 4a Process maize reads
 Calculate tpm
+```
 
+```
 Conduct DEseq
 
 ## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads
