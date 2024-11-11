@@ -143,10 +143,10 @@ hisat2-build -p 16 B73Refv5.fa B73Index
 rm BB73Refv5.fa
 
 # Loop over all fastq files in the input directory
-for fastq_F in "${input_dir}"/*humanremoved_F.fastq; do
+for fastq_F in "${input_dir}"/*_riboremoved_F.fastq; do
     #Derive Reverse Read
-    fastq_R=${fastq_F/humanremoved_F.fastq/humanremoved_R.fastq}
-    Name=$(basename "${fastq_F}" _humanremoved_F.fastq)
+    fastq_R=${fastq_F/F.fastq/R.fastq}
+    Name=$(basename "${fastq_F}" _riboremoved_F.fastq)
 
     # Run HISAT2
     hisat2 -p 32 -x "${maize_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Name}_mapped2maize.sam"
@@ -157,16 +157,15 @@ for fastq_F in "${input_dir}"/*humanremoved_F.fastq; do
     # Extract mapped reads
     samtools view -b -F 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_mapped2maize.sorted1.bam" -@ 32
 
-    # Convert BAM to FASTQ
+    # Convert BAM to FASTQ - use samtools to export a single paired output file and bedtools to create 2 paired-end files - which you'll need depends on your downstream purposes
     samtools bam2fq "./Output/${Name}_mapped2maize.sorted1.bam" > "./Output/${Name}_mapped2maize.fastq" -@ 32
-    #samtools bam2fq -n "./Output/${Name}_mapped2maize.sorted.bam" -1 "./Output/${Name}_mapped2maize_F.fastq" -2 "./Output/${Name}_mapped2maize_R.fastq"
     bedtools bamtofastq -i "./Output/${Name}_mapped2maize.sorted1.bam" -fq "./Output/${Name}_mapped2maize_F.fastq" -fq2 "./Output/${Name}_mapped2maize_R.fastq"
 
     # Extract unmapped reads
     samtools view -b -f 4 "./Output/${Name}_mapped2maize.sorted.bam" > "./Output/${Name}_maizeremoved.bam" -@ 32
 
     # Convert BAM to FASTQ
-    #samtools bam2fq "./Output/${Name}_maizeremoved.bam" > "./Output/${Name}_maizeremoved.fastq" --threads 32
+    samtools bam2fq "./Output/${Name}_maizeremoved.bam" > "./Output/${Name}_maizeremoved.fastq" --threads 32
     bedtools bamtofastq -i "./Output/${Name}_maizeremoved.bam" -fq "./Output/${Name}_maizeremoved_F.fastq" -fq2 "./Output/${Name}_maizeremoved_R.fastq"
 done
 ```
@@ -176,10 +175,38 @@ Calculate tpm
 
 ```
 Conduct DEseq
+```
 
-## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads
+```
+## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads using Kraken2
+```
+# Download all relvant databases and build the Kraken Library:
+kraken2-build --download-library bacteria --db /path/to/databases/Kraken2
+kraken2-build --build --db ./Kraken2 --threads 28
 
+# I've had problems with Kraken not using the number of threads I specify but fixed it by adding this line to my script:
+export OMP_NUM_THREADS=28
+
+# A loop to run Kraken:
+for fastq_F in ./Output/*_maizeremoved_F.fastq; do
+    # Derive Reverse Read
+    fastq_R=${fastq_F/F.fastq/R.fastq}
+    Name=$(basename "${fastq_F}" _maizeremoved_F.fastq)
+
+    # Run Kraken2 on the bacterial reference
+    kraken2 --db /share/gage/njkorth/GERMsD_TEST/RawData/Index/Kraken2 --threads 28 --paired "${fastq_F}" "${fastq_R}" \
+    --output "./KrakenOut/${Name}_Kraken2_Out.txt" --report "./KrakenOut/${Name}_Kraken2_Report.txt" \
+    --classified-out "./KrakenOut/${Name}_mapped2bacteria#.fastq"
+
+    # Run Kraken2 on the fungal reference
+    kraken2 --db /share/gage/njkorth/GERMsD_TEST/RawData/Index/K2Fungi --threads 12 --paired "${fastq_F}" "${fastq_R}" \
+    --output "./KrakenOut/${Name}_Kraken2F_Out.txt" --report "./KrakenOut/${Name}_Kraken2F_Report.txt" --classified-out "./KrakenOut/${Name}_mapped2fungi#.fastq"
+
+done
+```
 ## Contact
 For clarification on code missing annotation contact:
 * Nate Korth: njkorth@ncsu.edu / nate.korth@gmail.com
 * Joe Gage: jlgage@ncsu.edu
+
+Whatever parts of the pipeline you use, please remember to cite all relevant packages
