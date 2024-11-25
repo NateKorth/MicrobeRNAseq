@@ -21,10 +21,21 @@ The following can be installed to a conda environment with the command conda ins
 * eggNog-mapper
 
 ## Step0 Download Required Genomes
+Multiple Genomes and datasets will be required to complete the pipeline:
 The human genome can be found here: https://www.ncbi.nlm.nih.gov/datasets/taxonomy/9606/
 
 The Maize reference genome can be found here (Get both the genome and gff annotation file): https://www.maizegdb.org/assembly
 
+Download all required diamond databases via Eggnog (requires installation) and currate custom databases with:
+```
+download_eggnog_data.py --data_dir /path/to/data/storage/Eggnog2
+
+# create any custom, taxa specific databases with:
+create_dbs.py -m diamond --dbname Microbes --taxa Fungi,Bacteria,Archaea --data_dir /path/to/data/storage/Eggnog2
+```
+
+
+## Example Header
 Many of the following steps should be batched to a high performance cpu or they will take a very long time to run, here is an example header for the NCSU HPC cluster (IBM bsub): - just make sure the number of threads and amount of memory you request here are in line to what each command you run requires:
 ```
 #!/bin/bash
@@ -204,6 +215,10 @@ for fastq_F in ./Output/*_maizeremoved_F.fastq; do
 
 done
 ```
+
+## Step 6, Assign functionality to reads using Eggnog:
+
+
 ## Contact
 For clarification on code missing annotation contact:
 * Nate Korth: njkorth@ncsu.edu / nate.korth@gmail.com
