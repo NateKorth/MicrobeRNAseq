@@ -183,10 +183,20 @@ done
 ## Step 4a Process maize reads
 Calculate tpm
 ```
+# If you have a .gff3 file convert it to gtf with:
+agat_convert_sp_gff2gtf.pl --gff ../RawData/Zea_mays.Zm-B73-REFERENCE-NAM-5.0.59.chr.gff3 -o ../RawData/Zea_mays_B73_v5.1.gtf
 
+# Calculate tpm using feature counts package:
+for bam in ./Output/*mapped2maize.sorted.bam; do
+    Name=$(basename "${bam}" mapped2maize.sorted.bam)
+
+    #convert to feature counts table
+    featureCounts -p -t gene -T 6 -a ./RawData/Zea_mays_B73_v5.1.gtf -o "./Output/${Name}_MaizeFeature_counts.txt" ${bam}
+done
 ```
 Conduct DEseq
 ```
+#In R:
 
 ```
 ## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads using Kraken2
