@@ -235,7 +235,40 @@ done
 ```
 
 ## Step 6, Assign functionality to reads using Eggnog:
+```
+# First load anaconda manager with eggnog installed and download eggnog database
+# Make a database for just Microbes (Customize as you need):
+create_dbs.py -m diamond --dbname Microbes --taxa Bacteria,Fungi,Archaea --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2
 
+
+# Unzip any gzipped files before running:
+gunzip ./Output/*maizeremoved*fastq.gz
+
+#Combine fastqs into a single fasta
+for fastq_F in ./Output/*maizeremoved_F.fastq; do
+    #Derive Reverse Read
+    fastq_R=${fastq_F/F.fastq/R.fastq}
+    Name=$(basename "${fastq_F}" _maizeremoved_F.fastq)
+    #Pair fastqs with Pear
+    pear -f "$fastq_F" -r "$fastq_R" -o "./Output/${Name}" -j 30 -y 50G -p 0.05 -v 4 -m 450 -g 2
+    #Combine the assemble and unassembled reads
+    cat "./Output/${Name}.assembled.fastq" "./Output/${Name}.unassembled.forward.fastq" "./Output/${Name}.unassembled.reverse.fastq" > "./Output/${Name}.fastq"
+
+#Annotate function with diamond:
+#Using a lower e value cutoff to control for any plant reads being miss-annotated as fungi:
+    emapper.py -m diamond --no_annot --no_file_comments --cpu 32 --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
+    -i "./Output/${Name}.fastq" -o "${Name}_e3" --itype CDS --output_dir ./Output/Annotation --dmnd_db /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2/Microbes.dmnd
+
+#Add gene names
+    emapper.py --annotate_hits_table "./Output/Annotation/${Name}_e3.emapper.seed_orthologs" --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
+    --no_file_comments -o "${Name}_e3" --dbmem --output_dir ./Output/Annotation --cpu 32 --dmnd_db /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2/Microbes.dmnd
+
+done
+
+#cleanup:
+rm ./Output/*discarded*fastq
+gzip ./Output/*fastq
+```
 
 ## Contact
 For clarification on code missing annotation contact:
