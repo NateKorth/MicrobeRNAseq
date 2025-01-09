@@ -159,6 +159,9 @@ hisat2-build -p 16 B73Refv5.fa B73Index
 rm BB73Refv5.fa
 
 # Loop over all fastq files in the input directory
+
+maize_index="./RawData/Index/B73Index"
+
 for fastq_F in "${input_dir}"/*_riboremoved_F.fastq; do
     #Derive Reverse Read
     fastq_R=${fastq_F/F.fastq/R.fastq}
