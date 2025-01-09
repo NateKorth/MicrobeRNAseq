@@ -72,9 +72,15 @@ for fastq_F in ./RawData/*R1_001.fastq; do
 
     #See the trimmomatic manual for specifics in the following command:
 
+# Trimming with Trimmomatic
+for fastq_F in ./RawData/*R1_001.fastq.gz; do
+    #Derive Reverse Read
+    fastq_R=${fastq_F/R1_001.fastq/R2_001.fastq.gz}
+    Name=$(basename "${fastq_F}" _R1_001.fastq.gz)
+
 trimmomatic PE -phred33 -trimlog "${Name}_Trimlog.txt" "${fastq_F}" "${fastq_R}" \
-    "./RawData/${Name}_paired_F.fastq" "./RawData/${Name}_unpaired_F.fastq" \
-    "./RawData/${Name}_paired_R.fastq" "./RawData/${Name}_unpaired_R.fastq" \
+    "./RawData/${Name}_paired_F.fastq.gz" "./RawData/${Name}_unpaired_F.fastq.gz" \
+    "./RawData/${Name}_paired_R.fastq.gz" "./RawData/${Name}_unpaired_R.fastq.gz" \
     ILLUMINACLIP:TruSeq3-PE-2.fa:2:30:10:8:true \
     LEADING:3 TRAILING:3 SLIDINGWINDOW:4:10 MINLEN:50
 
@@ -92,24 +98,23 @@ rm HumanRef.fa
 # Loop over all fastq files in the input directory
 human_index="./RawData/Index/HumanRefIndex"
 
-for fastq_F in "${input_dir}"/*R1_001.fastq; do
+for fastq_F in .RawData/*_paired_F.fastq.gz; do
     #Derive Reverse Read
-    fastq_R=${fastq_F/R1_001.fastq/R2_001.fastq}
-    Output=$(basename "${fastq_F}" R1_001.fastq)
+    fastq_R=${fastq_F/_paired_F.fastq/_paired_R.fastq}
+    Name=$(basename "${fastq_F}" _paired_F.fastq)
 
     # Run HISAT2
-    hisat2 -p 32 -x "${human_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Output}_mapped2human.sam"
+    hisat2 -p 32 -x "${human_index}" -1 "${fastq_F}" -2 "${fastq_R}" --no-mixed --no-discordant -S "./Output/${Name}_mapped2human.sam"
 
     # Sort the SAM file and convert to BAM
-    samtools sort -o "${output_dir}/${Output}_mapped2human.sorted.bam" "${output_dir}/${Output}_mapped2human.sam" -@ 32
+    samtools sort -o "./Output/${Name}_mapped2human.sorted.bam" "./Output/${Name}_mapped2human.sam" -@ 32
 
     # Extract unmapped reads
-    samtools view -b -f 4 "${output_dir}/${Output}_mapped2human.sorted.bam" > "./Output/${Output}_humanremoved.bam" -@ 32
+    samtools view -b -f 4 "./Output/${Name}_mapped2human.sorted.bam" > "./Output/${Name}_humanremoved.bam" -@ 32
 
     # Convert BAM to FASTQ
-    samtools bam2fq "./Output/${Output}_humanremoved.bam" > "./Output/${Output}_humanremoved.fastq" -@ 32
-    bedtools bamtofastq -i "./Output/${Output}_humanremoved.bam" -fq "./Output/${Output}_humanremoved_F.fastq" -fq2 "./Output/${Output}_humanremoved_R.fastq"
-
+#    samtools bam2fq "./Output/${Name}_humanremoved.bam" > "./Output/${Name}_humanremoved.fastq.gz" -@ 32
+    bedtools bamtofastq -i "./Output/${Name}_humanremoved.bam" -fq "./Output/${Name}_humanremoved_F.fastq.gz" -fq2 "./Output/${Name}_humanremoved_R.fastq.gz"
 done
 
 # A few file deletions/conversions to save space:
