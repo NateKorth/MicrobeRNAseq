@@ -42,7 +42,6 @@ Many of the following steps should be batched to a high performance cpu or they 
 #BSUB -n 16
 #BSUB -R "rusage[mem=65GB]"
 #BSUB -W 75:00
-#BSUB -q gage
 #BSUB -J ProjectName
 #BSUB -o out.%J
 #BSUB -e err.%J
@@ -208,38 +207,70 @@ Conduct DEseq
 
 ```
 ## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads using Kraken2
+There are some pre-built Kraken2 indexes here:https://benlangmead.github.io/aws-indexes/k2
 ```
+#example header for an array job:
+#!/bin/bash
+#BSUB -n 12
+#BSUB -R "rusage[mem=60GB]"
+#BSUB -W 150:00
+#BSUB -J Kraken2[1-16]
+#BSUB -o logs/K2.out.%J.%I
+#BSUB -e logs/K2.err.%J.%I
+#BSUB -R "span[hosts=1]"
+
+#Activate a kraken2 environment or have Kraken2 installed on your workspace
+conda activate Kraken2
+
+# I've had problems with Kraken not using the number of threads I specify but fixed it by adding this line to the top of my scripts:
+export OMP_NUM_THREADS=12
+
 # Download all relvant databases and build the Kraken Library:
-kraken2-build --download-library bacteria --db /path/to/databases/Kraken2
-kraken2-build --build --db ./Kraken2 --threads 28
 
-# I've had problems with Kraken not using the number of threads I specify but fixed it by adding this line to my script:
-export OMP_NUM_THREADS=28
+#gtdb full database (this is a very large set of bacterial genomes
+aria2c -c -x 16 -s 16 -k 1M -o gtdb_genomes_reps.tar.gz "https://genome-idx.s3.amazonaws.com/kraken/k2_gtdb_genome_reps_20241109.tar.gz"
 
-# A loop to run Kraken:
-for fastq_F in ./Output/*_maizeremoved_F.fastq; do
-    # Derive Reverse Read
-    fastq_R=${fastq_F/F.fastq/R.fastq}
-    Name=$(basename "${fastq_F}" _maizeremoved_F.fastq)
+#Standard Database including fungi:
+aria2c -c -x 16 -s 16 -k 1M -o k2_StdplusF.tar.gz "https://genome-idx.s3.amazonaws.com/kraken/k2_pluspf_20241228.tar.gz"
 
-    # Run Kraken2 on the bacterial reference
-    kraken2 --db /share/gage/njkorth/GERMsD_TEST/RawData/Index/Kraken2 --threads 28 --paired "${fastq_F}" "${fastq_R}" \
+#Decompile it:
+tar --use-compress-program=pigz -xvf k2_StdplusF.tar.gz -C .
+
+# OR (if you have problems with the pre-built database, use k2 build:
+k2 build --db /path/to/databases/Kraken2 --standard --threads 12
+
+# Batch several Kraken2 jobs as an array:
+# File processing
+FASTQ_FILES=($(ls ./Output/*maizeremoved_F.fastq))
+SAMPLE=${FASTQ_FILES[$((LSB_JOBINDEX-1))]}
+
+# Derive Reverse Read
+fastq_F=$SAMPLE
+fastq_R=${fastq_F/F.fastq/R.fastq}
+Name=$(basename "${fastq_F}" _maizeremoved_F.fastq)
+
+#Loop through all fastqs with human seqs removed and run Kraken2:
+
+#Use the --memory-mapping flag if the active memory you have avaliable is less than the size of the database you're using (Kraken will otherwise load the whole database into active memory)
+
+k2 classify --db /path/to/databases/Kraken2 --threads 12 --paired "${fastq_F}" "${fastq_R}" \
     --output "./KrakenOut/${Name}_Kraken2_Out.txt" --report "./KrakenOut/${Name}_Kraken2_Report.txt" \
-    --classified-out "./KrakenOut/${Name}_mapped2bacteria#.fastq"
+    --classified-out "./KrakenOut/${Name}_mapped2microbes#.fastq" --memory-mapping --quick
 
-    # Run Kraken2 on the fungal reference
-    kraken2 --db /share/gage/njkorth/GERMsD_TEST/RawData/Index/K2Fungi --threads 12 --paired "${fastq_F}" "${fastq_R}" \
-    --output "./KrakenOut/${Name}_Kraken2F_Out.txt" --report "./KrakenOut/${Name}_Kraken2F_Report.txt" --classified-out "./KrakenOut/${Name}_mapped2fungi#.fastq"
+#rezip all the files:
+gzip ./KrakenOut/${Name}_mapped2microbes_1.fastq
+gzip ./KrakenOut/${Name}_mapped2microbes_2.fastq
 
-done
+conda deactivate
+
 ```
 
 ## Step 6, Assign functionality to reads using Eggnog:
+This script is in the form of a loop but if you have a lot of samples, might change batch each job seperatly using an array as done in the previous section
 ```
 # First load anaconda manager with eggnog installed and download eggnog database
 # Make a database for just Microbes (Customize as you need):
 create_dbs.py -m diamond --dbname Microbes --taxa Bacteria,Fungi,Archaea --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2
-
 
 # Unzip any gzipped files before running:
 gunzip ./Output/*maizeremoved*fastq.gz
@@ -256,12 +287,14 @@ for fastq_F in ./Output/*maizeremoved_F.fastq; do
 
 #Annotate function with diamond:
 #Using a lower e value cutoff to control for any plant reads being miss-annotated as fungi:
-    emapper.py -m diamond --no_annot --no_file_comments --cpu 32 --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
-    -i "./Output/${Name}.fastq" -o "${Name}_e3" --itype CDS --output_dir ./Output/Annotation --dmnd_db /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2/Microbes.dmnd
+
+    emapper.py -m diamond --no_annot --no_file_comments --cpu 32 --data_dir /path/to/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
+    -i "./Output/${Name}.fastq" -o "${Name}_e3" --itype CDS --output_dir ./Output/Annotation --dmnd_db /path/to/databases/Eggnog2/Microbes.dmnd
 
 #Add gene names
-    emapper.py --annotate_hits_table "./Output/Annotation/${Name}_e3.emapper.seed_orthologs" --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
-    --no_file_comments -o "${Name}_e3" --dbmem --output_dir ./Output/Annotation --cpu 32 --dmnd_db /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2/Microbes.dmnd
+
+    emapper.py --annotate_hits_table "./Output/Annotation/${Name}_e3.emapper.seed_orthologs" --data_dir path/to/databases/Eggnog2 --seed_ortholog_evalue 1e-3 \
+    --no_file_comments -o "${Name}_e3" --dbmem --output_dir ./Output/Annotation --cpu 32 --dmnd_db path/to/databases/Eggnog2/Microbes.dmnd
 
 done
 
@@ -272,7 +305,7 @@ gzip ./Output/*fastq
 
 ## Contact
 For clarification on code missing annotation contact:
-* Nate Korth: njkorth@ncsu.edu / nate.korth@gmail.com
-* Joe Gage: jlgage@ncsu.edu
+* Nate Korth: njkorthATncsu.edu or nate.korthATgmail.com
+* Joe Gage: jlgageATncsu.edu
 
 Whatever parts of the pipeline you use, please remember to cite all relevant packages
