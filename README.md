@@ -211,6 +211,7 @@ Conduct DEseq
 ```
 ## Step 5 Assign Bacterial / Fungal taxonomy to remaining reads using Kraken2
 There are some pre-built Kraken2 indexes here:https://benlangmead.github.io/aws-indexes/k2
+
 ```
 #example header for an array job:
 #!/bin/bash
