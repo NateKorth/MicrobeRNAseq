@@ -306,7 +306,25 @@ done
 rm ./Output/*discarded*fastq
 gzip ./Output/*fastq
 ```
+# Misc code
+## Make table of orthologous genes and scan list of candidate genes for orthologs: 
+```
+#In bash:
+#Download Maize protein fasta:
+wget http://download.maizegdb.org/Zm-B73-REFERENCE-NAM-5.0/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.protein.fa.gz
+#Download sorghum protein fasta:
+wget https://ftp.sorghumbase.org/release-9/fasta/sorghum_tx436pac/pep/Sorghum_tx436pac.Sorghum_bicolor-Tx436-Reference-CSHL-USDA-1.0.pep.all.fa.gz
 
+#install orthofinder (can use conda install)
+#run orthofinder: #Where -f is the folder containing the protein fasta files. See orthofinder documentation for more info: https://github.com/davidemms/OrthoFinder
+orthofinder -f input/ -t 12 -a 2
+
+#import ortholog file into R
+```
+```
+#In R:
+
+```
 ## Contact
 For clarification on code missing annotation contact:
 * Nate Korth: njkorthATncsu.edu or nate.korthATgmail.com
