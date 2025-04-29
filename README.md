@@ -26,8 +26,8 @@ The human genome can be found here: https://www.ncbi.nlm.nih.gov/datasets/taxono
 
 The Maize reference genome can be found here (Get both the genome and gff annotation file): https://www.maizegdb.org/assembly
 
-Sorghum reference genome: https://www.ebi.ac.uk/ena/browser/view/GCA_000003195.3 
-Sorghum gff annotation file: https://ftp.sorghumbase.org/release-9/gff3/ 
+Sorghum reference genome:  https://ftp.sorghumbase.org/release-9/fasta/sorghum_bicolorv5/dna/Sorghum_bicolorv5.Sb-BTX623-REFERENCE-JGI-5.1.dna.toplevel.fa.gz
+Sorghum gff annotation file:  https://ftp.sorghumbase.org/release-9/gff3/sorghum_bicolorv5/Sorghum_bicolorv5.Sb-BTX623-REFERENCE-JGI-5.1.gff3.gz
 
 Download all required diamond databases via Eggnog (requires installation) and currate custom databases with:
 ```
