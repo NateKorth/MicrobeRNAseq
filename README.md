@@ -313,7 +313,7 @@ gzip ./Output/*fastq
 #Download Maize protein fasta:
 wget http://download.maizegdb.org/Zm-B73-REFERENCE-NAM-5.0/Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.protein.fa.gz
 #Download sorghum protein fasta:
-wget https://ftp.sorghumbase.org/release-9/fasta/sorghum_tx436pac/pep/Sorghum_tx436pac.Sorghum_bicolor-Tx436-Reference-CSHL-USDA-1.0.pep.all.fa.gz
+wget https://ftp.sorghumbase.org/release-9/fasta/sorghum_bicolorv5/pep/Sorghum_bicolorv5.Sb-BTX623-REFERENCE-JGI-5.1.pep.all.fa.gz
 
 #install orthofinder (can use conda install)
 #run orthofinder: #Where -f is the folder containing the protein fasta files. See orthofinder documentation for more info: https://github.com/davidemms/OrthoFinder
