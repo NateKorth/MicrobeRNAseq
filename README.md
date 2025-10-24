@@ -306,6 +306,510 @@ done
 rm ./Output/*discarded*fastq
 gzip ./Output/*fastq
 ```
+## Step 6.1 Kraken taxonomy assignment
+```
+#In Bash:
+#Install Kraken2 - v2.14 (I use conda)
+conda activate Kraken2 
+# Download kraken database: This is a already built kraken database, can also usce kraken2-build --download library to build your database
+## Can find some pre built indexes here:https://benlangmead.github.io/aws-indexes/k2****
+aria2c -c -x 16 -s 16 -k 1M -o gtdb_genomes_reps.tar.gz "https://genome-idx.s3.amazonaws.com/kraken/k2_viral_20241228.tar.gz"
+# Deompile it
+tar --use-compress-program=pigz -xvf gtdb_genomes_reps.tar.gz -C .
+
+# File processing (This script uses an array type submission on an ibm submission system at the NC State hpc)
+FASTQ_FILES=($(ls ./Output/*maizeremoved_F.fastq))
+SAMPLE=${FASTQ_FILES[$((LSB_JOBINDEX-1))]}
+
+# Derive Reverse Read
+fastq_F=$SAMPLE
+fastq_R=${fastq_F/F.fastq/R.fastq}
+Name=$(basename "${fastq_F}" _maizeremoved_F.fastq)
+
+#Loop through all fastqs with human seqs removed and run Kraken2:
+
+    # Run Kraken2 on the bacterial reference
+    kraken2 --db path/to/your/databases/Kraken2 --threads 10 --paired "${fastq_F}" "${fastq_R}" \
+    --output "./KrakenOut/${Name}_Kraken2_Out.txt" --report "./KrakenOut/${Name}_Kraken2_Report.txt" \
+    --classified-out "./KrakenOut/${Name}_mapped2bacteria.fastq"
+
+    # Run Kraken2 on the fungal reference
+    kraken2 --db path/to/your/databases/Kraken2 --threads 12 --paired "${fastq_F}" "${fastq_R}" \
+    --output "./KrakenOut/${Name}_Kraken2F_Out.txt" --report "./KrakenOut/${Name}_Kraken2F_Report.txt" --classified-out "./KrakenOut/${Name}_mapped2fungi#.fastq"
+
+done
+
+#rezip all the files:
+gzip ./KrakenOut/${Name}_mapped2bacteria.fastq
+
+#Read how many sequences are in each fastq:
+for file in ./KrakenOut/*_F.fastq; do echo "$file: $(( $(grep -c '^@' "$file") / 4 )) reads";done
+
+conda deactivate
+```
+
+## Step 6.2, assign pathway information to microbial reads and collapse by pathway and gene level
+```
+#In R:
+# EggNOG Annotation Processing Script
+# Workflow:
+#   1. Read EggNOG annotation tables
+#   2. Select necessary columns
+#   3. Filter rows for Bacteria or Fungi
+#   4. Collapse by taxa + name + desc, count occurrences
+#   5. Save checkpoint CSV per sample
+#   6. Combine all checkpoints into one big table
+
+# --- Libraries ---
+suppressPackageStartupMessages({
+  library(data.table)
+  library(stringr)
+  library(ggplot2)
+  library(readxl)
+  library(tidyverse)
+  library(KEGGREST)
+})
+
+# --- Directories ---
+indir  <- "D:/Data/Path/to/EggnogAnnotations"
+outdir <- "./"
+
+# --- Get input files ---
+files <- list.files(indir, pattern="*annotations", full.names=TRUE)
+
+# --- Get already processed checkpoint files ---
+complete <- list.files(outdir, pattern="*_TaxaCounts.csv", full.names=TRUE)
+complete <- gsub("_TaxaCounts.csv$", "", basename(complete))
+
+# --- Filter out completed files (don’t reprocess) ---
+files <- setdiff(basename(files), complete)
+
+# --- Define processing function ---
+process_annotations <- function(txt_file, indir, outdir) {
+  infile <- file.path(indir, txt_file)
+  message("Processing: ", infile)
+  
+  # Read only needed columns
+  dt <- fread(
+    infile,
+    select = c("eggNOG_OGs", "max_annot_lvl", "Preferred_name", "Description", "seed_ortholog",
+               "evalue","KEGG_ko","KEGG_Module","CAZy","EC","GOs","PFAMs")
+  )
+  
+  # Rename for consistency
+  setnames(dt, 
+           c("eggNOG_OGs", "max_annot_lvl", "Preferred_name", "Description", "seed_ortholog",
+             "evalue","KEGG_ko","KEGG_Module","CAZy","EC","GOs","PFAMs"),
+           c("eggNOG_OGs", "taxa", "name", "desc","gene", "evalue","pathway_Kegg","pathway_KeggMod","pathway_CAZy","pathway_EC",
+             "pathway_GO","pathway_PFAM"))
+  
+  # Keep only Bacteria or Fungi
+  dt <- dt[grepl("Bacteria|Fungi", eggNOG_OGs, ignore.case = TRUE)]
+  dt <- dt[evalue <= 1e-6]
+  
+  # Collapse
+  gene_counts <- dt[, .(count = .N), by = gene]
+  meta_lookup <- unique(dt[, .(eggNOG_OGs,gene, taxa, name, desc,pathway_Kegg,pathway_KeggMod,pathway_CAZy,pathway_EC,pathway_GO,pathway_PFAM)])
+  dt_summary <- merge(gene_counts, meta_lookup, by = "gene", all.x = TRUE)
+  setcolorder(dt_summary, c("eggNOG_OGs", "taxa", "name", "desc","gene","pathway_Kegg","pathway_KeggMod","pathway_CAZy","pathway_EC",
+                            "pathway_GO","pathway_PFAM"))
+  
+  # Write checkpoint
+  outfile <- file.path(outdir, paste0(txt_file, "_TaxaCounts.csv"))
+  fwrite(dt_summary, outfile)
+  
+  return(outfile)
+}
+
+# --- Process all files (checkpoint stage) ---
+checkpoint_files <- c()
+for (f in files) {
+  outfile <- process_annotations(f, indir, outdir)
+  checkpoint_files <- c(checkpoint_files, outfile)
+}
+
+# --- Re-read all checkpoint files & combine ---
+all_checkpoints <- list.files(outdir, pattern="*_TaxaCounts.csv", full.names=TRUE)
+
+combined <- rbindlist(lapply(all_checkpoints, function(f) {
+  dt <- fread(f)
+  sample_id <- gsub("_TaxaCounts.csv$", "", basename(f))
+  dt[, sample := sample_id]
+  return(dt)
+}), use.names = TRUE, fill = TRUE)
+
+wide_df <- combined %>%
+  dplyr::select(eggNOG_OGs,taxa, name, desc, gene,pathway_CAZy,pathway_EC,pathway_GO,pathway_Kegg,pathway_PFAM,pathway_KeggMod, sample, count) %>%
+  pivot_wider(
+    names_from = sample,
+    values_from = count,
+    values_fill = list(count = 0)
+  )
+
+sample_cols <- setdiff(colnames(wide_df), c("eggNOG_OGs","taxa","taxa2", "name", "desc", "gene","pathway_Kegg","pathway_KeggMod","pathway_CAZy","pathway_EC",
+                                            "pathway_GO","pathway_PFAM","A_Test.emapper.annotations","B_Test.emapper.annotations"))
+
+#Make a new column that is a sum of all reads per gene
+wide_df <- wide_df %>%
+  mutate(AllSamples = rowSums(across(all_of(sample_cols)), na.rm = TRUE))
+
+wide_df <- wide_df %>%
+  mutate(taxa2 = sub(".*\\|(.*)$", "\\1", eggNOG_OGs))
+
+gc()
+
+# Collapse the genes into one per taxa:
+collapsed_df <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-" & desc != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  mutate(
+    taxa2 = str_to_lower(taxa2),
+    name = str_to_lower(name),
+    pathway_EC=str_to_lower(pathway_EC)
+  ) %>%
+  # group by the unique combination of taxa, name, desc
+  group_by(taxa2, name,pathway_EC) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+write.csv(collapsed_df,"Microbe_Genes_counts.csv")
+
+# Collect pathway data for later use
+gene2pathway <- collapsed_df %>%
+  dplyr::select(name, pathway_EC, taxa2) %>%
+  filter(!is.na(name) & name != "") %>%
+  distinct()
+
+# Split ECs into separate rows and sum counts per EC
+df_ec <- gene2pathway %>%
+  filter(pathway_EC != "-") %>%
+  separate_rows(pathway_EC, sep = ",") %>%
+  mutate(pathway_EC = trimws(pathway_EC)) %>%
+  group_by(taxa2, name,pathway_EC) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+# EC → Pathway mapping (character vector)
+ec2path <- keggLink("pathway", "ec")
+
+ec2path_tbl <- tibble(
+  pathway_EC = sub("ec:", "", names(ec2path)),
+  pathway    = basename(ec2path))%>%
+  filter(!grepl("ec", pathway))
+
+# Get unique pathway descriptions
+path_ids <- unique(ec2path_tbl$pathway)
+
+# safer to query in chunks
+get_desc <- function(pid) {
+  tryCatch({
+    keggList(pid) %>% unname()
+  }, error = function(e) NA_character_)
+}
+
+path_descs <- map_chr(path_ids, get_desc)
+
+path_tbl <- tibble(
+  pathway = path_ids,
+  desc_p    = path_descs
+)
+
+# Join descriptions back
+ec2path_tbl <- ec2path_tbl %>%
+  left_join(path_tbl, by = "pathway")
+
+# Join counts and collapse
+df_final <- df_ec %>%
+  left_join(ec2path_tbl, by = "pathway_EC") %>%
+  filter(!is.na(desc_p)) %>%   # only keep map pathways
+  group_by(taxa2, name,pathway_EC,pathway, desc_p) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+# Save to CSV
+write.csv(df_final, "MicrobeGene2PathwayA.csv", row.names = FALSE)
+
+
+# collapse the genes into one per taxa:
+collapsed_df_ByGene <- collapsed_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  mutate(
+    name = str_to_lower(name),
+    desc = str_to_lower(desc),
+    pathway_EC=str_to_lower(pathway_EC),
+    pathway_Kegg=str_to_lower(pathway_Kegg)
+  ) %>%
+  # group by the unique combination of taxa, name, desc
+  group_by(name,desc,pathway_EC,pathway_Kegg) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+gene2pathway <- collapsed_df_ByGene %>%
+  dplyr::select(name, desc, pathway_EC, pathway_Kegg) %>%
+  filter(!is.na(name) & name != "") %>%
+  distinct()
+
+# Split ECs into separate rows and sum counts per EC
+df_ec <- gene2pathway %>%
+  filter(pathway_EC != "-") %>%
+  separate_rows(pathway_EC, sep = ",") %>%
+  mutate(pathway_EC = trimws(pathway_EC)) %>%
+  group_by(name, desc, pathway_EC, pathway_Kegg) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+# EC → Pathway mapping (character vector)
+ec2path <- keggLink("pathway", "ec")
+
+ec2path_tbl <- tibble(
+  pathway_EC = sub("ec:", "", names(ec2path)),
+  pathway    = basename(ec2path))%>%
+  filter(!grepl("ec", pathway))
+
+# Get unique pathway descriptions
+path_ids <- unique(ec2path_tbl$pathway)
+
+# safer to query in chunks
+get_desc <- function(pid) {
+  tryCatch({
+    keggList(pid) %>% unname()
+  }, error = function(e) NA_character_)
+}
+
+#path_descs <- map_chr(path_ids, get_desc)
+
+path_tbl <- tibble(
+  pathway = path_ids,
+  desc_p    = path_descs
+)
+
+# Step : join descriptions back
+ec2path_tbl <- ec2path_tbl %>%
+  left_join(path_tbl, by = "pathway")
+
+# Join counts and collapse
+df_final <- df_ec %>%
+  left_join(ec2path_tbl, by = "pathway_EC") %>%
+  filter(!is.na(desc_p)) %>%   # only keep map pathways
+  group_by(name, desc, pathway_EC, pathway_Kegg,pathway, desc_p) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+# Save to CSV
+write.csv(df_final, "MicrobeGene2PathwayB.csv", row.names = FALSE)
+
+# Pick your favorite annotation method and
+# collapse the genes into pathways:
+collapsed_df_ByPathway_GO <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_GO) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+collapsed_df_ByPathway_PFAM <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_PFAM) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+collapsed_df_ByPathway_EC <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_EC) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+collapsed_df_ByPathway_KeggMod <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_KeggMod) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+collapsed_df_ByPathway_CAZy <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_CAZy) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+collapsed_df_ByPathway_Kegg <- wide_df %>%
+  # remove rows with "-" in name and desc
+  filter(name != "-") %>%
+  # standardize to lowercase to ignore capitalization
+  # group by the unique combination of taxa, name, desc
+  group_by(pathway_Kegg) %>%
+  # sum all sample columns
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+#wide_df_filtered<-subset(collapsed_df,AllSamples>=1000)
+
+# --- Write final combined output ---
+write.csv(collapsed_df,"Microbe_Genes_counts.csv")
+write.csv(collapsed_df_ByGene,"Microbe_Genes_collapsed_counts.csv")
+
+
+message("Done! Final combined table saved to: ", final_outfile)
+
+PART 2, add pathway info:
+
+# Now read in pathway data:
+# Read in bacterial pathway summaries
+Pathway_files <- list.files("../../AnnotationOutputs/", pattern = "*_Bacteria.csv", full.names = TRUE)
+
+Pathway_list <- lapply(Pathway_files, function(f) {
+  df <- fread(f)
+  # Add sample name (remove long suffix so it's just H1, H2, etc.)
+  df[, Sample := sub("_Bacteria.csv", "", basename(f))]
+  return(df)
+})
+
+# Combine into one long table
+Pathway_combined <- rbindlist(Pathway_list, use.names = TRUE, fill = TRUE)
+
+sample_cols_path <- setdiff(colnames(Pathway_wide), c("Pathways"))
+
+# Now you can pivot wider
+Pathway_wide <- dcast(Pathway_combined, Pathways ~ Sample, value.var = "TotalCounts")
+Pathway_wide <- Pathway_wide %>%
+  mutate(AllSamples = rowSums(across(all_of(sample_cols_path)), na.rm = TRUE))
+
+
+# Histogram-style binning
+hist_df_Path <- Pathway_wide %>%
+  count(AllSamples, name = "N")
+
+
+# Plot histograms to look at distributions of microbial genes/pathways at different levels
+ggplot(collapsed_df, aes(x = AllSamples)) +
+  geom_histogram(bins = 75, fill = "steelblue") +
+  scale_x_log10() + 
+  theme_classic(base_size = 14) +
+  labs(
+    x = "log10(Total Genes per taxa Occurrences Across Samples)",
+    y = "Number of Genes",
+    title = "Distribution of Total Gene Occurrences"
+  )#+scale_y_break(c(4000, 10989000))
+
+ggplot(collapsed_df_ByGene, aes(x = AllSamples)) +
+  geom_histogram(bins = 75, fill = "steelblue") +
+  scale_x_log10() + 
+  theme_classic(base_size = 14) +
+  labs(
+    x = "log10(Total Gene Occurrences Across Samples)",
+    y = "Number of Genes",
+    title = "Distribution of Total Pathway Occurrences"
+  )
+
+ggplot(collapsed_df_ByPathway_GO, aes(x = AllSamples)) +
+  geom_histogram(bins = 75, fill = "steelblue") +
+  scale_x_log10() + 
+  theme_classic(base_size = 14) +
+  labs(
+    x = "log10(Total Pathway Occurrences Across Samples)",
+    y = "Number of Pathways",
+    title = "Distribution of Total Pathway Occurrences"
+  )
+
+#################################
+#Calculate Fungal and Bacterial Reads
+
+reads_summary <- wide_df %>%
+  # tag rows as "bacteria" or "fungi" if present
+  mutate(group = case_when(
+    str_detect(tolower(taxa), "bacteria") ~ "Bacteria",
+    str_detect(tolower(taxa), "fungi") ~ "Fungi",
+    TRUE ~ NA_character_
+  )) %>%
+  # keep only those two
+  filter(!is.na(group)) %>%
+  # collapse by group
+  group_by(group) %>%
+  summarise(across(all_of(sample_cols), sum, na.rm = TRUE), .groups = "drop")
+
+#Turn EC numbers into pathways:
+
+# Split ECs into separate rows and sum counts per EC
+df_ec <- collapsed_df_ByPathway_EC %>%
+  filter(pathway_EC != "-") %>%
+  separate_rows(pathway_EC, sep = ",") %>%
+  mutate(pathway_EC = trimws(pathway_EC)) %>%
+  group_by(pathway_EC) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+# EC → Pathway mapping (character vector)
+ec2path <- keggLink("pathway", "ec")
+
+ec2path_tbl <- tibble(
+  pathway_EC = sub("ec:", "", names(ec2path)),
+  pathway    = basename(ec2path))%>%
+  filter(!grepl("ec", pathway))
+
+# get unique pathway descriptions
+path_ids <- unique(ec2path_tbl$pathway)
+
+# safer to query in chunks
+get_desc <- function(pid) {
+  tryCatch({
+    keggList(pid) %>% unname()
+  }, error = function(e) NA_character_)
+}
+
+path_descs <- map_chr(path_ids, get_desc)
+
+path_tbl <- tibble(
+  pathway = path_ids,
+  desc    = path_descs
+)
+
+# Join descriptions back
+ec2path_tbl <- ec2path_tbl %>%
+  left_join(path_tbl, by = "pathway")
+
+# Join counts and collapse
+df_final <- df_ec %>%
+  left_join(ec2path_tbl, by = "pathway_EC") %>%
+  filter(!is.na(desc)) %>%   # only keep map pathways
+  group_by(pathway, desc) %>%
+  summarise(across(starts_with("H"), sum), .groups = "drop")
+
+write.csv(df_final,"Microbe_Pathways_collapsed_EC_counts.csv")
+```
+# R markdowns for additional Steps:
+## CompareSeqTypes 
+Rarefy and Filter datasets (Huge difference in read counts between transcriptome and amplicon)
+Normalize Data
+Quantify Shared Taxa between sequencing types
+Compare mean and coefficients of variation between soil types
+
+## MaizeAndSorghumTranscriptAnalysis
+Ortholog Mapping - and merging orthologous genes
+Global Transcriptomic Variation (PERMANOVA)
+Differential Expression Analysis and visulization (DESeq2) 
+Functional Enrichment and GO Annotation
+
+## MicrobeFunctionAnalysis
+Anlysis pipeline written to accomodate gene or pathway resolution
+Principal Component Analysis (PCA)
+ALDEx2 Differential Analysis
+
+## MaizeAndMicrobeCoexpression
+Mantel Test and PERMANOVA
+Bipartite Network analysis (complete and subset by temperature)
+Differential Correlation Between Temperatures
+Elastic Net Regression (Biomass & Heat Stress Prediction)
+Random Forest analysis (Biomass & Heat Stress Prediction)
+Combination of Outputs to select important features
+
 # Misc code
 ## Make table of orthologous genes and scan list of candidate genes for orthologs: 
 ```
@@ -321,11 +825,44 @@ orthofinder -f input/ -t 12 -a 2
 
 #import ortholog file into R
 ```
+# Amplicon Workflows (for amplicons from DNA and RNA)
 ```
-#In R:
+# Work flows are essentially the same as in the dada2 tutorial found on Ben Callahan's github: https://benjjneb.github.io/dada2/tutorial_1_8.html
+# Specifics for this dataset include truncation:
+FORWARD_TRUNC <- 300 # determine from quality plots
+REVERSE_TRUNC <- 285 # determine from quality plots
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
+                     truncLen=c(FORWARD_TRUNC,REVERSE_TRUNC),
+                     trimLeft=c(17, 21), maxEE=c(4,6),
+                     multithread=no_of_cores,
+                     matchIDs=TRUE, compress=TRUE,
+                     verbose=TRUE,n=1e6)
+# This version of the SILVA database: Silva_nr99_v138.2_Genus.fa.gz
+# Using Atchinson's distance for Beta diversity: Code by Isabella Borrero
+#normalize to relative abundance
+ps.prop <- transform_sample_counts(ps.clean.p1, function(OTU) OTU/sum(OTU))
+#transform using CLR to account for compositionality of the data 
+ps_tr_clr <- microbiome::transform(ps.prop, "clr")
+sample_data(ps_tr_clr)$Genotype_Soil <- interaction(sample_data(ps_tr_clr)$Genotype, sample_data(ps_tr_clr)$Soil)
 
+ord.pcoa.euc <- ordinate(ps_tr_clr, method="PCoA", distance="euclidean")
+
+#PCoA (Aitchison's Distance) Active Fraction
+plot_ordination(ps_tr_clr, ord.pcoa.euc, color = "Soil") +
+  geom_point(aes(shape = Temp), size = 3) +
+  #facet_wrap(~Soil) +  
+  theme_classic() +
+  theme(text = element_text(size = 20, family = "sans")) +
+  #ggtitle("PCoA (Aitchison's Distance)") +
+  ylab("PC2 (10.9%variance explained)")+
+  xlab("PC1 (38% variance explained)")+
+  scale_color_manual(values=c("brown3","purple1"))+
+  labs(shape = "Temperature")
+
+ps_dist_matrix_clr_euc <- phyloseq::distance(ps_tr_clr, method ="euclidean")
 ```
-## Contact
+
+# Contact
 For clarification on code missing annotation contact:
 * Nate Korth: njkorthATncsu.edu or nate.korthATgmail.com
 * Joe Gage: jlgageATncsu.edu
