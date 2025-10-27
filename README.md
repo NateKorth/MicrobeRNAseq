@@ -784,32 +784,36 @@ df_final <- df_ec %>%
 
 write.csv(df_final,"Microbe_Pathways_collapsed_EC_counts.csv")
 ```
-# R markdowns for additional Steps:
+# Descriptions of R markdowns for Analyses:
 ## CompareSeqTypes 
-### Rarefy and Filter datasets (Huge difference in read counts between transcriptome and amplicon)
-### Normalize Data
-### Quantify Shared Taxa between sequencing types
-### Compare mean and coefficients of variation between soil types
-
+```
+Rarefy and Filter datasets (Huge difference in read counts between transcriptome and amplicon)
+Normalize Data
+Quantify Shared Taxa between sequencing types
+Compare mean and coefficients of variation between soil types
+```
 ## MaizeAndSorghumTranscriptAnalysis
-### Ortholog Mapping - and merging orthologous genes
-### Global Transcriptomic Variation (PERMANOVA)
-### Differential Expression Analysis and visulization (DESeq2) 
-### Functional Enrichment and GO Annotation
-
+```
+Ortholog Mapping - and merging orthologous genes
+Global Transcriptomic Variation (PERMANOVA)
+Differential Expression Analysis and visulization (DESeq2) 
+Functional Enrichment and GO Annotation
+```
 ## MicrobeFunctionAnalysis
-### Anlysis pipeline written to accomodate gene or pathway resolution
-### Principal Component Analysis (PCA)
-### ALDEx2 Differential Analysis
-
+```
+Anlysis pipeline written to accomodate gene or pathway resolution
+Principal Component Analysis (PCA)
+ALDEx2 Differential Analysis
+```
 ## MaizeAndMicrobeCoexpression
-### Mantel Test and PERMANOVA
-### Bipartite Network analysis (complete and subset by temperature)
-### Differential Correlation Between Temperatures
-### Elastic Net Regression (Biomass & Heat Stress Prediction)
-### Random Forest analysis (Biomass & Heat Stress Prediction)
-### Combination of Outputs to select important features
-
+```
+Mantel Test and PERMANOVA
+Bipartite Network analysis (complete and subset by temperature)
+Differential Correlation Between Temperatures
+Elastic Net Regression (Biomass & Heat Stress Prediction)
+Random Forest analysis (Biomass & Heat Stress Prediction)
+Combination of Outputs to select important features
+```
 # Misc code
 ## Make table of orthologous genes and scan list of candidate genes for orthologs: 
 ```
