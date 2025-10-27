@@ -139,7 +139,7 @@ If possible do this step on a gpu, at NCstate the header looks like this:
 ```
 Ribodetetctor is a deep learning method to identify rRNA, read more about it and how to install it as a conda environment here: https://github.com/hzi-bifo/RiboDetector
 ```
-conda activate /usr/local/usrapps/gage/njkorth/ribodetect
+conda activate /ribodetect
 
 #Loops to run ribodetector on all fastq files in Output Folder:
 for fastq_F in ./Output/*humanremoved_F.fastq; do
@@ -274,7 +274,7 @@ This script is in the form of a loop but if you have a lot of samples, might cha
 ```
 # First load anaconda manager with eggnog installed and download eggnog database
 # Make a database for just Microbes (Customize as you need):
-create_dbs.py -m diamond --dbname Microbes --taxa Bacteria,Fungi,Archaea --data_dir /rs1/researchers/j/jlgage/users/njkorth/databases/Eggnog2
+create_dbs.py -m diamond --dbname Microbes --taxa Bacteria,Fungi,Archaea --data_dir /path/to/your/databases/Eggnog
 
 # Unzip any gzipped files before running:
 gunzip ./Output/*maizeremoved*fastq.gz
