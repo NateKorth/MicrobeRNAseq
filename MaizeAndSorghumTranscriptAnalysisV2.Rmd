@@ -1,0 +1,721 @@
+---
+title: "MaizeAndSorghumTranscriptAnalysis"
+author: "Nate Korth"
+date: "2025-07-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/GERMsHeatStress/")
+library(ggplot2)
+library(readxl)
+library(DESeq2)
+library(apeglm)
+library(ggrepel)
+library(dplyr)
+library(vegan)
+library(tidyr)
+library(rtracklayer)
+library(ggpubr)
+library(gplots)
+library(igraph)
+library(ggraph)
+library(ggvenn)
+library(UpSetR)
+library(stringr)
+library(tidyr)
+library(edgeR)
+library(purrr)
+```
+
+#Read in both maize and sorghum genes, this analysis will only consider genes that are orthologous
+
+```{r Read-in files and combine datasets based on orthologous genes}
+#Read in MetaData:
+MetaData<-read_excel("HotGERMs_SampleSelection.xlsx",sheet = "Sheet2")
+#subset only sequenced samples
+MetaData<-subset(MetaData,Sequenced=="Yes")
+MetaData<-subset(MetaData,Genotype!="BS")
+MetaData$Species <- ifelse(MetaData$Genotype == "SAP", "Sorghum", "Maize")
+
+rownames(MetaData)<-MetaData$ID2
+MetaData$Genotype <- factor(MetaData$Genotype)
+MetaData$Temp2 <- factor(MetaData$Temp2)
+MetaData$Soil <- factor(MetaData$Soil)
+MetaData$Species<- factor(MetaData$Species)
+
+maize_file_list <- list.files(path = "./FeatureCounts/Annotation3/MaizeFeatureCounts/",pattern=".txt")
+maize_path<-"./FeatureCounts/Annotation3/MaizeFeatureCounts"
+maize_file_list1<-file.path(maize_path, maize_file_list)
+  
+# Initialize an empty list to store dataframes
+maize_data_list <- list()
+
+# Loop through each file to add feature counts to one file
+for (file in maize_file_list1) {
+  temp_data <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  base_name <- tools::file_path_sans_ext(basename(file))
+  shortened_name <- paste(strsplit(base_name, "_")[[1]][1], collapse = "_")
+  colnames(temp_data)[7] <- shortened_name
+  maize_data_list[[file]] <- temp_data
+}
+
+# Merge all dataframes by the first 6 columns
+maize_combined_data <- Reduce(function(x, y) merge(x, y, by = colnames(x)[1:6], all = TRUE), maize_data_list)
+
+sorghum_file_list <- list.files(path = "./FeatureCounts/Annotation3/SorghumFeatureCounts/",pattern=".txt")
+sorghum_path<-"./FeatureCounts/Annotation3/SorghumFeatureCounts"
+sorghum_file_list1<-file.path(sorghum_path, sorghum_file_list)
+
+# Initialize an empty list to store dataframes
+sorghum_data_list <- list()
+
+# Loop through each file to add feature counts to one file
+for (file in sorghum_file_list1) {
+  temp_data <- read.table(file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  base_name <- tools::file_path_sans_ext(basename(file))
+  shortened_name <- paste(strsplit(base_name, "_")[[1]][1], collapse = "_")
+  colnames(temp_data)[7] <- shortened_name
+  sorghum_data_list[[file]] <- temp_data
+}
+
+# Merge all dataframes by the first 6 columns
+sorghum_combined_data <- Reduce(function(x, y) merge(x, y, by = colnames(x)[1:6], all = TRUE), sorghum_data_list)
+
+maizegenes<-maize_combined_data$Geneid
+sorghumgenes<-gsub("(\\.[^\\.]+){1,2}$","", sorghum_combined_data$Geneid)
+
+# ortholog list made using orthofinder
+orthologs<-read.table("./Zm-B73-REFERENCE-NAM-5.0_Zm00001eb.1.protein.tsv",sep="\t",header=T)
+
+# Remove isoform from  gene names in orthologs
+orthologs$Maize <- gsub("_P\\d+", "", orthologs$Zm.B73.REFERENCE.NAM.5.0_Zm00001eb.1.protein)
+
+# Split multiple entries into long format
+ortho_long <- orthologs %>%
+  separate_rows(Maize, sep = ",\\s*") %>%
+  separate_rows(Orthologs, sep = ",\\s*") %>%
+  dplyr::select(Orthogroup, Maize, Orthologs)
+
+#remove sorghum isoforms
+ortho_long$Sorghum <- gsub("(\\.[^\\.]+){2,3}$","", ortho_long$Orthologs)
+ortho_long$Orthologs<-NULL
+
+# Filter for genes in both datasets
+matched_orthos <- ortho_long %>%
+  filter(Maize %in% maizegenes, Sorghum %in% sorghumgenes)
+
+
+matched_orthos_unique <- matched_orthos %>%
+  distinct()
+
+# Preview the result
+head(matched_orthos)
+
+# Now filter both maize and sorghum based on genes in the matched ortholog file
+maize_filtered <- maize_combined_data %>%
+  filter(Geneid %in% matched_orthos_unique$Maize)
+
+sorghum_filtered <- sorghum_combined_data %>%
+  mutate(Geneid = gsub("(\\.[^\\.]+){1,2}$", "", Geneid)) %>%
+  filter(Geneid %in% matched_orthos_unique$Sorghum)
+# Add Orthogroup info to both
+maize_annotated <- left_join(maize_filtered, matched_orthos_unique, by = c("Geneid" = "Maize"))
+sorghum_annotated <- left_join(sorghum_filtered, matched_orthos_unique, by = c("Geneid" = "Sorghum"))
+
+# Rename Geneid columns for clarity before combining
+maize_annotated <- dplyr::rename(maize_annotated, Maize_Geneid = Geneid)
+
+sorghum_annotated <-dplyr::rename(sorghum_annotated,Sorghum_Geneid = Geneid)
+
+# Merge on Orthogroup
+combined_data <- full_join(maize_annotated, sorghum_annotated, by = "Orthogroup", suffix = c(".maize", ".sorghum"))
+
+# Preview the result
+head(combined_data)
+
+count_cols <- grep("^H\\d+$", names(combined_data), value = TRUE)
+count_matrix <- combined_data[, count_cols]
+count_matrix$ID<-combined_data$Maize_Geneid
+#Remove duplicated rows:
+count_matrix <- count_matrix[!duplicated(count_matrix), ]
+
+keep <- rowSums(count_matrix >= 75) >= 4
+count_matrix <- count_matrix[keep,]
+
+#reorder the count data to match the metadata
+count_matrix1 <-cbind(GeneID=count_matrix$ID,count_matrix[, MetaData$ID2])
+
+#Calculate the average read count of orthologous genes:
+mean(colSums(count_matrix1[-c(1)]))
+sd(colSums(count_matrix1[-c(1)]))
+#write.csv(count_matrix1,"MaizeSorghumOrthologs.csv")
+```
+
+```{r PERMANOVA to test terms}
+count_cols <- grep("^H\\d+$", names(combined_data), value = TRUE)
+count_matrix <- combined_data[, count_cols]
+#Remove duplicated rows:
+count_matrix <- count_matrix[!duplicated(count_matrix), ]
+
+keep <- rowSums(count_matrix >= 75) >= 4
+count_matrix <- count_matrix[keep,]
+
+#reorder the count data to match the metadata
+count_matrix <- count_matrix[, MetaData$ID2]
+
+log_counts <- t(log1p(count_matrix))
+
+identical(rownames(log_counts), MetaData$ID2)
+
+# Run PERMANOVA using adonis2 (formula similar to DESeq2 design)
+permanova_res <- adonis2(log_counts ~ Genotype * Temp2 * Soil,by="terms", data = MetaData, method = "euclidean")
+
+# View result
+print(permanova_res)
+
+```
+adonis2(formula = log_counts ~ Genotype * Temp2 * Soil, data = MetaData, method = "euclidean", by = "terms")
+                    Df SumOfSqs      R2       F Pr(>F)    
+Genotype             2   378744 0.57655 34.7955  0.001 ***
+Temp2                1    15603 0.02375  2.8670  0.038 *  
+Soil                 1     8000 0.01218  1.4698  0.223    
+Genotype:Temp2       2    15304 0.02330  1.4060  0.199    
+Genotype:Soil        2    51422 0.07828  4.7242  0.001 ***
+Temp2:Soil           1     9748 0.01484  1.7911  0.130    
+Genotype:Temp2:Soil  2     9382 0.01428  0.8619  0.501    
+Residual            31   168715 0.25683                   
+Total               42   656916 1.00000  
+
+PERMANOVA indicates Gentoype:Soil interaction is important for global transcriptional profile
+
+```{r RunDEseq}
+#Run a DEseq2 analysis on merged dataset
+
+# Extract only count columns (starting with 'H') — these are sample IDs
+count_cols <- grep("^H\\d+$", names(combined_data), value = TRUE)
+count_matrix <- combined_data[, count_cols]
+
+combined_data$U_Orthogroup <- make.unique(as.character(combined_data$Orthogroup))
+
+rownames(count_matrix) <- combined_data$U_Orthogroup
+#Remove duplicated rows:
+count_matrix <- count_matrix[!duplicated(count_matrix), ]
+
+#Final Matrix for Deseq
+count_matrix <- count_matrix[rowSums(count_matrix) > 10, ]
+
+#reorder the count data to match the metadata
+count_matrix <- count_matrix[, MetaData$ID2]
+
+#Check to make sure meta data and count data are in the same order:
+all(rownames(MetaData) == colnames(count_matrix))
+
+#Make DEseq data set:
+dds <- DESeqDataSetFromMatrix(countData = count_matrix,
+       colData = MetaData,
+       design = ~Genotype + Temp2 + Soil + Soil:Temp2)
+dds
+#Pre filtering Keep rows (genes) that have at least 75 reads in 3 samples 
+smallestGroupSize <- 3
+keep <- rowSums(counts(dds) >= 80) >= smallestGroupSize
+dds <- dds[keep,]
+
+#To test model terms:
+
+#Start wit a full model, then drop interaction terms and us a Likelihood Ratio test to see if dropping the term reduces model fit:
+#ddsFULL<- DESeq(dds, test = "LRT", reduced = ~ Genotype + Temp2 + Soil)
+#res <- results(ddsFULL)
+#head(res,n=1)
+#table(res$padj < 0.1)
+#InteractionGenes<-subset(as.data.frame(res),padj<=0.1)
+#write.csv(InteractionGenes,"InteractionGenesbyLRT.csv")
+
+#Remember to change the model back to how you want it:
+ddsA <- DESeq(dds)
+
+normalized_counts <- as.data.frame((counts(ddsA, normalized = TRUE)))
+
+ortholog_map <- combined_data %>%
+  dplyr::select(Maize_Geneid, U_Orthogroup) %>%
+  filter(!is.na(U_Orthogroup))
+
+#Export a table of orthologs, listed as maize genes and normalized for co-expression analysis: 
+normalized_counts1<-normalized_counts %>% 
+  tibble::rownames_to_column(var = "U_Orthogroup") %>% 
+  left_join(ortholog_map, by = "U_Orthogroup")
+normalized_counts1$U_Orthogroup<-NULL
+#For orthogroups that contain the same maize gene, sum their expression 
+normalized_counts_summed <- as.data.frame(normalized_counts1 %>%
+  group_by(Maize_Geneid) %>%
+  summarise(across(where(is.numeric), sum, na.rm = TRUE)) %>%
+  ungroup())
+
+rownames(normalized_counts_summed)<-normalized_counts_summed$Maize_Geneid
+normalized_counts_summed$Maize_Geneid <- NULL
+#write.csv(normalized_counts_summed,"MaizeSorghumOrthologsNormalized.csv")
+
+resA <- results(ddsA,contrast = c("Temp2","28C","38C"))
+resG1 <- results(ddsA,contrast = c("Genotype","CML103","CML52"))
+resG2 <- results(ddsA,contrast = c("Genotype","CML103","SAP"))
+resG3 <- results(ddsA,contrast = c("Genotype","SAP","CML52"))
+#resG4 <- results(ddsA,contrast = c("Species","Maize","Sorghum"))
+resS <- results(ddsA,contrast = c("Soil","Autoclaved","Field"))
+#resI<-results(ddsA, name = "GenotypeCML52.Temp238C.SoilField")
+
+#More info or results:
+#mcols(resI)$description
+
+#To look at names of variables:
+resultsNames(ddsA)
+
+#LogFold Shrinkage
+resLFC_A <- lfcShrink(ddsA, coef="Temp2_38C_vs_28C",type = "apeglm")
+resLFC_G1 <- lfcShrink(ddsA, contrast = c("Genotype", "CML52", "CML103"), type = "ashr")
+resLFC_G2 <- lfcShrink(ddsA, contrast = c("Genotype", "SAP", "CML52"), type = "ashr")
+resLFC_G3 <- lfcShrink(ddsA, contrast = c("Genotype", "SAP", "CML103"), type = "ashr")
+#resLFC_G4 <- lfcShrink(ddsA, coef="Species_Sorghum_vs_Maize",type = "apeglm")
+resLFC_S <- lfcShrink(ddsA, coef="Soil_Field_vs_Autoclaved",type = "apeglm")
+#resLFC_I <- lfcShrink(ddsA, coef="GenotypeCML52.Temp238C.SoilField",type = "apeglm")
+
+#Look at number of genes up/down regulated
+summary(resA)
+summary(resG1)
+summary(resG2)
+summary(resG3)
+#summary(resG4)
+summary(resS)
+#summary(resI)
+
+
+```
+Summary of LRT results
+
+| Reduced Model Formula                                                     | Genes DE (padj < 0.05) |
+| ------------------------------------------------------------------------- | ---------------------- |
+| `~ Genotype + Temp2 + Soil + Genotype:Soil + Genotype:Temp2 + Soil:Temp2` | **77**                 |
+| `~ Genotype + Temp2 + Soil + Genotype:Soil + Genotype:Temp2`              | **403**                |
+| `~ Genotype + Temp2 + Soil + Genotype:Soil + Soil:Temp2`                  | **1,357**              |
+| `~ Genotype + Temp2 + Soil + Genotype:Temp2 + Soil:Temp2`                 | **1,055**              |
+| `~ Genotype + Temp2 + Soil + Genotype:Soil`                               | **2,019**              |
+| `~ Genotype + Temp2 + Soil + Genotype:Temp2`                              | **1,783**              |
+| `~ Genotype + Temp2 + Soil + Soil:Temp2`                                  | **2,581**              |
+| `~ Genotype + Temp2 + Soil`                                               | **3,236**              |
+
+run table(MetaData$Genotype, MetaData$Temp2, MetaData$Soil) to see:
+There's only 2 reps of sorghum at 28C and Field Soil, so any Genotype interaction is underpowered (Probably why there's a large number of DE genes when including those interactions)
+
+because of this underpowing (Result of missing samples) probably best to only include soil x Temp interaction
+
+```{r plot DEseq Results}
+#Add a list of genes ID'd in literature to be involved in heatstress:
+MaizeLitTable<-read_excel("LiteratureData/DataSummary.xlsx",sheet="AllGenesMaizeV5")
+#MaizeLitTable<-subset(MaizeLitTable,Dataset!="Ali2025")
+MaizeLitSum <- MaizeLitTable %>%
+  group_by(GeneV5) %>%
+  summarise(Dataset_Count = n_distinct(Dataset)) %>%
+  arrange(desc(Dataset_Count))
+
+ortholog_map <- combined_data %>%
+  dplyr::select(Maize_Geneid, U_Orthogroup) %>%
+  filter(!is.na(U_Orthogroup))
+
+# Inner join keeps only matching genes and adds Ortholog_U
+MaizeLitSum_filtered <- MaizeLitSum %>%
+  inner_join(ortholog_map, by = c("GeneV5" = "Maize_Geneid"))
+
+#LFC<-plotMA(resLFC_A,returnData=TRUE)
+LFC <- as.data.frame(resLFC_A)
+
+LFC$logBaseMean <- log10(LFC$baseMean)
+LFC$Gene<-rownames(LFC)
+LFC$pval<-(-1)*log10(LFC$padj)
+
+Lim<-max(abs(LFC$log2FoldChange))
+
+
+LFC <- LFC %>%
+  tibble::rownames_to_column("Orthogroup")
+
+# Join with gene_summary_filtered based on Orthogroup / Ortholog_U
+LFC <- LFC %>%
+  left_join(MaizeLitSum_filtered %>% dplyr::select(U_Orthogroup, Dataset_Count),
+            by = c("Orthogroup" = "U_Orthogroup"))
+
+LFC <- LFC %>%
+  left_join(ortholog_map %>% dplyr::select(U_Orthogroup,Maize_Geneid),
+            by = c("Orthogroup" = "U_Orthogroup"))
+
+# (Optional) If you want to put the Orthogroup back as rownames
+LFC <- LFC %>%
+  tibble::column_to_rownames("Orthogroup")
+LFC$Dataset_Count[is.na(LFC$Dataset_Count)] <- 0
+#Order LFC so high abundance genes are on top:
+#LFC <- LFC[order(LFC$Dataset_Count), ]
+LFC$Dataset_Count <- as.factor(LFC$Dataset_Count)
+
+#write.csv(LFC,"GenesDEinCML103VsSAP.csv")
+
+#VolcanoPlot (Temp):
+ggplot(LFC,aes(x=log2FoldChange,y=pval,color=Dataset_Count))+theme_classic()+xlim((Lim*-1-1),(1+Lim))+
+geom_point(alpha=.65,size=1.5)+
+  scale_color_manual(values=c("#FAEBDDFF","#F6AE86FF", "#F4815AFF", "#ED4E3EFF","#D3214BFF"))+ #theme(legend.position = "none")+
+  #scale_color_gradient(low = "lightgrey", high = "darkred", name = "log10(transcript abundance)")+
+  labs(y="-log10 p-value",x = "Log2 Fold Change")+
+  annotate("text", x = min(LFC$log2FoldChange, na.rm = TRUE), y = max(LFC$pval, na.rm = TRUE), label = "28C", hjust = 0, size = 6) +
+  annotate("text", x = -1*(min(LFC$log2FoldChange, na.rm = TRUE)), y = max(LFC$pval, na.rm = TRUE), label = "38C", hjust = 0, size = 6)+geom_hline(yintercept = 1.577,linetype=2,size=1.1,color="grey33")+
+  theme(text=element_text(size=22,family = "sans"))
+
+#ggsave("../Figures/DEseqMaizeSorghumTemp_VolcanoPlot.pdf",width=6,height=6)
+
+process_LFC_results <- function(res_object, padj_threshold = 0.1, lfc_threshold = .1) {
+  df <- as.data.frame(res_object)
+  df$isDE <- ifelse(!is.na(df$padj) &
+                    df$padj < padj_threshold &
+                    abs(df$log2FoldChange) > lfc_threshold, TRUE, FALSE)
+  df$logBaseMean <- log10(df$baseMean)
+  df$Gene <- rownames(df)
+  df$pval <- -log10(df$pvalue)
+  df$direction <- ifelse(df$isDE & df$log2FoldChange > 0, "Up",
+                         ifelse(df$isDE & df$log2FoldChange < 0, "Down", NA))
+  df_sig <- subset(df, isDE == TRUE)
+  return(df)
+}
+
+LFCS<-process_LFC_results(resLFC_S)
+LFCT<-process_LFC_results(resLFC_A)
+LFCG1<-process_LFC_results(resLFC_G1)
+LFCG2<-process_LFC_results(resLFC_G2)
+LFCG3<-process_LFC_results(resLFC_G3)
+
+venn_data2.1 <- list(
+  Soil = LFCS$Gene,
+  Temperature = LFCT$Gene,
+  CML52vsCML103 = LFCG1$Gene,
+  SAPvsCML52 = LFCG2$Gene,
+  SAPvsCML103 = LFCG3$Gene
+)
+#venn_data <- euler(venn_data2.1)
+
+#pdf("./Figures/MaizeTranscriptVenn1.pdf", width = 6, height = 6)
+#plot(venn_data,
+#     fills = c("brown4", "orange3", "green4","green3","green1"),
+#     labels = list(font = 4),
+#     quantities = TRUE)
+
+#dev.off()
+
+# Make an upset plot:
+# Create a combined unique gene list
+soil_de_genes <- LFCS$Gene[LFCS$isDE]
+temp_de_genes <- LFCT$Gene[LFCT$isDE]
+g1_de_genes   <- LFCG1$Gene[LFCG1$isDE]
+g2_de_genes   <- LFCG2$Gene[LFCG2$isDE]
+g3_de_genes   <- LFCG3$Gene[LFCG3$isDE]
+de_genotype <- unique(c(g1_de_genes, g2_de_genes, g3_de_genes))
+de_all3 <- Reduce(intersect, list(temp_de_genes, soil_de_genes, de_genotype))
+
+
+# Create a combined unique list of ONLY significant DEGs
+all_de_genes <- unique(c(soil_de_genes, temp_de_genes, g1_de_genes, g2_de_genes, g3_de_genes))
+
+# Build the binary matrix based on these significant genes
+upset_data <- data.frame(
+  Gene = all_de_genes,
+  Soil = as.integer(all_de_genes %in% soil_de_genes),
+  Temperature = as.integer(all_de_genes %in% temp_de_genes),
+  CML52vsCML103 = as.integer(all_de_genes %in% g1_de_genes),
+  SAPvsCML52 = as.integer(all_de_genes %in% g2_de_genes),
+  SAPvsCML103 = as.integer(all_de_genes %in% g3_de_genes)
+)
+
+# Remove "Gene" column and plot
+upset_matrix <- upset_data
+upset_matrix$Gene<-NULL
+
+
+upset(upset_matrix, sets = c("Soil", "Temperature", "CML52vsCML103","SAPvsCML52","SAPvsCML103"),
+  sets.bar.color = "firebrick", order.by = "freq",keep.order = TRUE,text.scale = c(2.2, 2.2, 1.9, 1.8, 1.8, 1.7))
+
+#Plot a stacked bar to add to upset plot:
+LFCS$comparison <- "Soil"
+LFCT$comparison <- "Temperature"
+LFCG1$comparison <- "CML52 vs CML103"
+LFCG2$comparison <- "SAP vs CML52"
+LFCG3$comparison <- "SAP vs CML103"
+all_DEGs <- bind_rows(LFCS, LFCT, LFCG1, LFCG2, LFCG3)
+
+deg_summary <- all_DEGs %>%
+  group_by(comparison, direction) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(deg_summary, aes(x = comparison, y = n, fill = direction)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("Up" = "firebrick", "Down" = "steelblue3")) +
+  labs(x = "Comparison",y = "Number of DEGs",
+    fill = "Direction") + theme_void() +theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top")
+#ggsave("./Figures/UpDownGenesStackedBar.pdf",width = 4,height = 7)
+
+#Calculate the number of DE genes supported by literature: 
+LFCA2<-process_LFC_results(LFC)
+LFCA2$Dataset_Count<-as.numeric(LFCA2$Dataset_Count)
+LFCA2_Supported<-subset(LFCA2,Dataset_Count>=4)
+LFCA2_SupportedT<-subset(LFCA2_Supported,isDE==TRUE)
+LFCA2T<-subset(LFCA2,isDE==TRUE)
+```
+Plot upsetPlot:
+```{r MaizeTranscriptUpset1, include=FALSE}
+
+pdf("Figures/MaizeTranscriptUpset1.pdf", width = 14, height = 8)
+
+upset(upset_matrix, sets = c("Soil", "Temperature", "CML52vsCML103","SAPvsCML52","SAPvsCML103"),
+  sets.bar.color = "firebrick", order.by = "freq",keep.order = TRUE,text.scale = c(2.2, 2.2, 1.9, 1.8, 1.8, 1.7))
+
+dev.off()
+
+```
+
+
+```{r GO tests}
+library(biomaRt)
+
+#Pull all annotations:
+# Set up Ensembl Plants mart for maize
+ensembl <- useMart("plants_mart", dataset = "zmays_eg_gene", host = "https://plants.ensembl.org")
+
+# List of all maize genes that have orthologs
+MaizeOrthos1<-unique(rownames(dds))
+MaizeGenes1<-combined_data %>%
+  filter(U_Orthogroup %in% MaizeOrthos1) %>%
+  pull(Maize_Geneid) %>%
+  unique() %>%
+  na.omit()
+
+all_annotations <- getBM(
+  attributes = c("ensembl_gene_id","external_gene_name","go_id","namespace_1003","name_1006"),
+  filters = "ensembl_gene_id",values = MaizeGenes1,mart = ensembl)
+
+# Filter to only biological_process GO terms
+go_bg <- all_annotations %>%
+  filter(!is.na(name_1006), namespace_1003 == "biological_process")
+
+
+get_go_enrichment_from_orthogroups <- function(sig_genes, combined_data, mart, comparison_name, go_bg) {
+  # 1. Map orthogroups to maize gene IDs
+  gene_ids <- merge(
+    data.frame(Orthogroup = sig_genes),
+    combined_data,
+    by.x = "Orthogroup",
+    by.y = "U_Orthogroup",
+    all.x = TRUE
+  )$Maize_Geneid %>% unique() %>% na.omit()
+  
+  # 2. Retrieve raw GO annotations for DE genes
+  go_df <- getBM(
+    attributes = c("chromosome_name", "transcript_length", "ensembl_gene_id",           "external_gene_name", "go_id", "namespace_1003", "name_1006"),
+    filters = "ensembl_gene_id",values = gene_ids,mart = mart)
+  
+  
+  
+  # 4. Background GO counts
+  bg_counts <- go_bg %>%
+    filter(!is.na(name_1006), namespace_1003 == "biological_process") %>%
+    distinct(ensembl_gene_id, name_1006) %>%
+    count(name_1006, name = "bg_count") %>%
+  filter(bg_count > 5)
+
+  # 5. DE GO counts
+  de_counts <- go_df %>%
+    filter(!is.na(name_1006), namespace_1003 == "biological_process") %>%
+    distinct(ensembl_gene_id, name_1006) %>%
+    count(name_1006, name = "de_count") %>%
+  filter(de_count > 5)
+  # 3. Total background gene count
+  N <- length(unique(bg_counts$name_1006))
+  
+  # 6. Enrichment test (Fisher's exact)
+  enrichment_df <- full_join(de_counts, bg_counts, by = "name_1006") %>%
+    replace_na(list(de_count = 0, bg_count = 0)) %>%
+    rowwise() %>%
+    mutate(
+      total_de = sum(de_count),
+      total_bg = N,
+      pval = phyper(de_count - 1, bg_count, total_bg - bg_count, total_de, lower.tail = FALSE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      adj_pval = p.adjust(pval, method = "BH"),
+      Comparison = comparison_name
+    ) %>%
+    arrange(adj_pval)
+
+  return(list(enrichment = enrichment_df, annotations = go_df))
+}
+
+result_temp <- get_go_enrichment_from_orthogroups(de_temp, combined_data, ensembl, "Temperature", go_bg)
+enriched_go <- result_temp$enrichment
+
+```
+
+#Same thing with TopGO
+
+```{r topgo}
+library(topGO)
+library(tibble)
+go_bg <- all_annotations %>%
+  filter(!is.na(name_1006), namespace_1003 == "biological_process") %>%
+  filter(go_id > 10)
+
+get_go_enrichment_from_orthogroups <- function(sig_genes, combined_data, mart, comparison_name, go_bg) {
+
+  # 1. Map orthogroups to maize gene IDs
+  gene_ids <- merge(
+    data.frame(Orthogroup = sig_genes),
+    combined_data,
+    by.x = "Orthogroup",
+    by.y = "U_Orthogroup",
+    all.x = TRUE
+  )$Maize_Geneid %>% unique() %>% na.omit()
+
+  # 2. Create gene universe
+  all_genes <- unique(go_bg$ensembl_gene_id)
+  #gene_list <- factor(as.integer(all_genes %in% gene_ids))
+  gene_list <- factor(as.integer(all_genes %in% gene_ids), levels = c("0", "1"))
+  names(gene_list) <- all_genes
+
+  # 3. Create gene-to-GO mapping
+  geneID2GO <- go_bg %>%
+    filter(!is.na(go_id), namespace_1003 == "biological_process") %>%
+    group_by(ensembl_gene_id) %>%
+    summarise(go_terms = list(unique(go_id))) %>%
+    deframe()
+
+  # 4. Build topGO data object
+  GOdata <- new("topGOdata",
+                ontology = "BP",
+                allGenes = gene_list,
+                annot = annFUN.gene2GO,
+                gene2GO = geneID2GO,
+                nodeSize = 5)
+
+  # 5. Run enrichment test
+  resultFisher <- runTest(GOdata, algorithm = "weight01", statistic = "fisher")
+
+  # 6. Extract results table
+  enrichment_df <- GenTable(
+    GOdata,
+    Fisher = resultFisher,
+    orderBy = "Fisher",
+    topNodes = length(score(resultFisher))) %>%
+    filter(Annotated >= 2) %>%
+    rename(name_1006 = Term,go_id = GO.ID,pval = Fisher) %>%
+    mutate(pval = as.numeric(pval),
+      Significant = as.numeric(Significant),
+      Expected = as.numeric(Expected),
+      # Calculate Log2 Fold Enrichment
+      Log2FoldEnrichment = log2(Significant / Expected),
+      adj_pval = p.adjust(pval, method = "fdr"),
+      Comparison = comparison_name) %>%
+    arrange(adj_pval)
+
+  # 7. Return both enrichment and raw annotations
+  return(list(enrichment = enrichment_df, annotations = geneID2GO))
+}
+
+
+#result_temp <- get_go_enrichment_from_orthogroups(de_temp, combined_data, ensembl, "Temperature", go_bg)
+#T_enriched_go <- result_temp$enrichment
+
+go_results <- list(
+  Intersect = get_go_enrichment_from_orthogroups(de_all3, combined_data, ensembl, "Intersect", go_bg),
+  Temperature   = get_go_enrichment_from_orthogroups(temp_de_genes, combined_data, ensembl, "Temperature", go_bg),
+  Soil= get_go_enrichment_from_orthogroups(soil_de_genes, combined_data, ensembl, "Soil", go_bg),
+  CML52vsCML103 = get_go_enrichment_from_orthogroups(g1_de_genes,   combined_data, ensembl, "CML52vsCML103", go_bg),
+  SAPvsCML52     = get_go_enrichment_from_orthogroups(g2_de_genes,   combined_data, ensembl, "SAPvsCML52", go_bg), 
+  SAPvsCML103   = get_go_enrichment_from_orthogroups(g3_de_genes,   combined_data, ensembl, "SAPvsCML103", go_bg))
+
+
+# Extract and combine significant terms
+significant_go_df <- map_dfr(
+  go_results,
+  ~ .x$enrichment %>% 
+    filter(pval < .05),
+  .id = "Comparison")
+#write.csv(significant_go_df,"SignificantGOTermsPlant.csv")
+```
+
+```{r plot topgo results}
+# First for just the intersect:
+IntersectGO<-subset(significant_go_df,Comparison=="Intersect")
+IntersectGO<-subset(IntersectGO,Significant>=4)
+
+# Create long format for plotting both Observed and Expected
+go_long <- IntersectGO %>%
+  dplyr::select(name_1006, Expected, Significant) %>%
+  pivot_longer(cols = c(Expected, Significant),
+               names_to = "Type",
+               values_to = "Count")
+
+# Segment data (wide form again) to connect Expected -> Observed
+segments_df <- IntersectGO %>%
+  dplyr::select(name_1006, Expected, Significant)
+
+# Plot
+ggplot(go_long, aes(x = reorder(name_1006, Count), y = Count, color = Type)) +
+    coord_flip() + theme_classic(base_size = 14) +
+  labs(x = "GO Term",y = "Gene Count",color = "Count Type") +
+  scale_color_manual(values = c("Expected" = "gray40", "Significant" = "firebrick")) +
+  geom_segment(data = segments_df,
+               aes(x = name_1006, xend = name_1006, y = Expected, yend = Significant),
+               inherit.aes = FALSE,
+               color = "gray20", linewidth = 0.8)+geom_point(size = 4) +
+  theme(axis.text.y = element_text(size = 13))+
+  theme(text=element_text(size=20,family = "sans"))
+
+#ggsave("./Figures/IntersectGos.pdf",width=10,height=5)
+
+```
+Same GO enrichment plot but show log fold enrichment
+```{r}
+# Filter for the Intersect terms with enough signal
+PlotData <- significant_go_df %>%
+  filter(Comparison == "Intersect", Significant >= 5) %>%
+  # Optionally filter for only the top 15-20 most enriched terms for clarity
+  slice_min(order_by = pval, n = 20)
+
+ggplot(PlotData, aes(x = reorder(name_1006, Log2FoldEnrichment), y = Log2FoldEnrichment, fill = Significant)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  coord_flip() +
+  scale_fill_gradient(low = "#3C1A42FF", high = "#ED4E3EFF") + # Color by significance
+  theme_classic(base_size = 14) +
+  labs(
+    x = "Biological Process",
+    y = "Log2 Fold Enrichment (Observed/Expected)",
+    fill = "Gene Number"
+  ) +
+  theme(
+    text = element_text(family = "sans", size = 18),
+    axis.text.y = element_text(size = 12)
+  )
+
+ggsave("../Figures/PlantIntersectGOTermsLFC.jpeg",dpi=600,width =10,height=5)
+```
+
+
+
+```{r convert sorghum geneIDs}
+SorgGenes0<-read_excel("LiteratureData/DataSummary.xlsx",sheet="Sorghum2Maize")
+
+sorgGenes1<-unique(merge(SorgGenes0,ortho_long,by.x="SorghumGene",by.y="Sorghum"))
+write.csv(sorgGenes1,"Sorghum2MaizeGenes.csv")
+
+MaizeGenes0<-read_excel("LiteratureData/DataSummary.xlsx",sheet="Maize2Maize")
+MaizeTable<-read.csv("C:/Users/njkorth/Data/Genomes/maize_assembly_gene_model_conversion.csv")
+
+MaizeGenes1<-unique(merge(MaizeGenes0,MaizeTable,by.x="V4",by.y="B73_GRAMENE_4.0"))
+write.csv(MaizeGenes1[1:2],"Maize2MaizeGenes.csv")
+
+```
+

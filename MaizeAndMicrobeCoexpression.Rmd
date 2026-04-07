@@ -1,0 +1,561 @@
+---
+title: "MaizeAndMicrobeCoexpression"
+author: "Nate Korth"
+date: "2025-08-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+knitr::opts_knit$set(root.dir = "~/GERMsHeatStress/")
+library(tidyverse)
+library(reshape2)
+library(vegan)
+library(igraph)
+library(ggraph)
+library(randomForest)
+library(glmnet)
+library(caret)
+library(compositions)
+library(readxl)
+library(mixOmics)
+library(tidygraph)
+library(scales)
+```
+
+Load and Prepare Data
+
+```{r}
+setwd("~/GERMsHeatStress/")
+
+# Load metadata
+MetaData <- read_excel("HotGERMs_SampleSelection.xlsx", sheet = "Sheet2")
+rownames(MetaData) <- MetaData$ID2
+
+# Keep only sequenced and exclude Genotype "BS"
+MetaData <- MetaData %>%
+  filter(Sequenced == "Yes", Genotype != "BS") %>%
+  mutate(
+    Biomass_Shoot = as.numeric(`Biomass(Shoot)`),
+    Species = ifelse(Genotype == "SAP", "Sorghum", "Maize")
+  )
+
+# Load Plant data (normalized counts)
+Plant <- read.csv("MaizeSorghumOrthologsNormalized.csv", row.names = 1)
+
+PlantPathway<-read.csv("PlantExpression_byKEGGPathway.csv", row.names = 1)
+rownames(PlantPathway) <- gsub(" - Zea mays \\(maize\\)", "", rownames(PlantPathway))
+
+# Filter Plant: keep genes with counts >= 70 in more than 3 samples
+Plant2 <- Plant %>% dplyr::select(where(is.numeric)) %>% filter(rowSums(. >= 250) > 3)
+
+# Load Bacterial pathways data and filter out mammalian pathways
+exclude_paths <- c("Secondary bile acid biosynthesis","Antigen processing and presentation","Apelin signaling pathway","Apoptosis","Retrograde endocannabinoid signaling","Basal transcription factors","Complement and coagulation cascades","Efferocytosis","Fc gamma R-mediated phagocytosis","Ferroptosis","Gastric acid secretion","Glucagon signaling pathway","Neuroactive ligand-receptor interaction","Neutrophil extracellular trap formation","Oxytocin signaling pathway","Parathyroid hormone synthesis","Phagosome","Platinum drug resistance","Toxoplasmosis","Virion - Bacteriophage lambda","Human cytomegalovirus infection","Drug metabolism - cytochrome P450","Primary bile acid biosynthesis")
+#Single Genes
+bacteria <- read.csv("AnnotationOutputs/GeneCounts/Microbe_Genes_collapsed_counts.csv", row.names = 1)
+#Collapsed at Pathway
+bacteriaPaths<-read.csv("AnnotationOutputs/GeneCounts/Microbe_Pathways_collapsed_EC_counts.csv")
+bacteriaPaths$X<-NULL
+
+########TODO do network with pathways
+
+bacteria<-bacteriaPaths
+
+bacteria <- bacteria[!bacteria$desc %in% exclude_paths, ]
+
+bacteria <- bacteria %>%
+  mutate(desc = ifelse(desc == 
+           "Biosynthesis of various antibiotics; Including: Kanosamine biosynthesis, Aurachin biosynthesis, Bacilysin biosynthesis, Puromycin biosynthesis, Dapdiamides biosynthesis, Fosfomycin biosynthesis, Cremeomycin biosynthesis, Fumagillin biosynthesis, Pentalenolactone biosynthesis, Terpentecin biosynthesis, Roseoflavin biosynthesis, Cycloserine biosynthesis","Biosynthesis of antibiotics",desc))
+bacteria <- bacteria %>%
+  mutate(desc = ifelse(desc == 
+           "Biosynthesis of various other secondary metabolites; Including: Ditryptophenaline biosynthesis, Fumiquinazoline D biosynthesis, Paerucumarin biosynthesis, Staphyloferrin B biosynthesis, Cyclooctatin biosynthesis, Lovastatin biosynthesis, Grixazone biosynthesis, Staphyloferrin A biosynthesis, Ethynylserine biosynthesis, Aerobactin biosynthesis","Secondary metabolites biosynthesis A",desc))
+bacteria <- bacteria %>%
+  mutate(desc = ifelse(desc == 
+           "Biosynthesis of various plant secondary metabolites; Including: Crocin biosynthesis, Ginsenoside biosynthesis, Saponin adjuvant biosynthesis, Cannabidiol biosynthesis, Mugineic acid biosynthesis, Pentagalloylglucose biosynthesis, Benzoxazinoid biosynthesis, Gramine biosynthesis, Coumarin biosynthesis, Furanocoumarin biosynthesis, Hordatine biosynthesis, Podophyllotoxin biosynthesis","Secondary metabolites biosynthesis B",desc))
+bacteria <- bacteria %>%
+  mutate(desc = ifelse(desc == 
+           "Biosynthesis of various alkaloids; Including: Cucurbitacin biosynthesis, Solanine and tomatine biosynthesis, Ephedrine biosynthesis, Capsaicin biosynthesis, Acridone alkaloid biosynthesis","Alkaloid Biosynthesis",desc))
+bacteria <- bacteria %>%
+  mutate(desc = ifelse(desc == 
+           "Biosynthesis of 12-, 14- and 16-membered macrolides; Including: Tylosin biosynthesis, Mycinamicin biosynthesis, Erythromycin biosynthesis, Oleandomycin biosynthesis, Pikromycin/methymycin biosynthesis, Avermectin biosynthesis","Macrolides Biosynthesis",desc))
+
+
+
+
+rownames(bacteria)<-bacteria$desc
+# Filter bacteria rows: keep pathways with counts >=150 in more than 3 samples
+bacteria2 <- bacteria %>% dplyr::select(where(is.numeric)) %>% filter(rowSums(. >= 150) > 3)
+
+# CLR transform bacteria data
+bacteria2_clr <- as.data.frame(apply(bacteria2 + 1, 2, clr))
+colnames(bacteria2_clr)<- gsub("\\.emapper\\.annotations$","",colnames(bacteria2_clr))
+
+# Ensure common samples across datasets
+common_cols <- intersect(colnames(Plant2), colnames(bacteria2_clr))
+
+Plant2 <- as.matrix(Plant2[, common_cols])
+bacteria2 <- as.matrix(bacteria2_clr[, common_cols])
+
+
+
+# Scale for mantel and regression analyses
+Plant2_Scaled <- scale(Plant2, center = TRUE, scale = TRUE)
+bacteria2_Scaled <- scale(bacteria2, center = TRUE, scale = TRUE)
+
+# Keep unscaled for network and RF
+Plant_raw <- Plant2
+bacteria_raw <- bacteria2
+
+```
+1. Mantel Test and PERMANOVA
+This section calculates distance matrices on scaled data, runs Mantel tests and PERMANOVAs to assess relationships between plant transcriptome and microbial pathways.
+
+```{r}
+# Calculate Euclidean distances
+distPlant <- dist(t(Plant2_Scaled), method = "euclidean")
+distBacteria <- dist(t(bacteria2_Scaled), method = "euclidean")
+
+# Mantel test with Spearman correlation, 5000 permutations
+mantel_result <- vegan::mantel(distPlant, distBacteria, method = "spearman", permutations = 5000)
+print(mantel_result)
+
+# Prepare sample pairs for grouping
+sample_names <- attr(distPlant, "Labels")
+sample_pairs <- combn(sample_names, 2, simplify = FALSE)
+
+rownames(MetaData) <- MetaData$ID2
+
+soil1 <- vapply(sample_pairs, function(x) as.character(MetaData[x[1], "Soil"]), character(1))
+soil2 <- vapply(sample_pairs, function(x) as.character(MetaData[x[2], "Soil"]), character(1))
+
+soil_group <- ifelse(soil1 == soil2, "Same Soil", "Different Soil")
+
+temp1 <- vapply(sample_pairs, function(x) as.character(MetaData[x[1], "Temp2"]), character(1))
+temp2 <- vapply(sample_pairs, function(x) as.character(MetaData[x[2], "Temp2"]), character(1))
+temp_group <- ifelse(temp1 == temp2, "Same Temperature", "Different Temperature")
+
+species1 <- vapply(sample_pairs, function(x) as.character(MetaData[x[1], "Species"]), character(1))
+species2 <- vapply(sample_pairs, function(x) as.character(MetaData[x[2], "Species"]), character(1))
+species_group <- ifelse(species1 == species2, "Same Species", "Different Species")
+
+mantel_df <- data.frame(
+  PlantDist = as.vector(distPlant),
+  BacteriaDist = as.vector(distBacteria),
+  SoilGroup = soil_group,
+  TempGroup = temp_group,
+  SpeciesGroup = species_group
+)
+
+# PERMANOVAs
+adonis_bact <- adonis2(distBacteria ~ Soil + Species + Temp2 + Soil:Temp2, data = MetaData, permutations = 5000, by = "terms")
+adonis_plant <- adonis2(distPlant ~ Soil + Species + Temp2 + Soil:Temp2, data = MetaData, permutations = 5000, by = "terms")
+
+# Format PERMANOVA output for plotting subtitle
+format_perm <- function(res) {
+  res <- res[!rownames(res) %in% c("Residual", "Total"), ]
+  paste0(rownames(res), ": ", round(res$R2, 2), " (p=", signif(res$`Pr(>F)`, 2), ")", collapse = " | ")
+}
+
+stats_bact <- format_perm(adonis_bact)
+stats_plant <- format_perm(adonis_plant)
+
+# Plot Mantel scatterplot with groups
+mantelplot<-ggplot(mantel_df, aes(x = PlantDist, y = BacteriaDist, color = SoilGroup, shape = SpeciesGroup)) +
+  geom_point(alpha = 0.65, size = 2.5) +
+  scale_color_manual(values = c("Same Soil" = "brown", "Different Soil" = "blue")) +
+  theme_classic(base_size = 14) +
+  labs(title = paste0("Mantel r = ", round(mantel_result$statistic, 3), " | p = ", round(mantel_result$signif, 4)),subtitle = paste0("PERMANOVA (Bacteria): ", stats_bact, "\nPERMANOVA (Plant): ", stats_plant),x = "Plant Distance",y = "Microbial Distance",color = "Soil Comparison")+theme(axis.text = element_text(size = 18, family = "sans"),axis.title = element_text(size = 18, family = "sans"))
+
+ggsave("./Figures/MantelResults4.pdf",plot=mantelplot, width = 12, height = 7)
+print(mantelplot)
+```
+
+2. Network Analysis of Strong Gene-Pathway Correlations
+Build a network from strong Spearman correlations (>0.7) between raw gene and pathway abundance data.
+```{r}
+# Transpose raw matrices: samples x features
+gene_mat <- t(Plant_raw)
+bact_mat <- t(bacteria_raw)
+
+# Calculate Spearman correlations
+cor_matrix <- cor(gene_mat, bact_mat, method = "spearman", use = "pairwise.complete.obs")
+
+# Extract strong correlations
+cor_df <- reshape2::melt(cor_matrix)
+colnames(cor_df) <- c("PlantGene", "MicrobeGene", "Correlation")
+edges <- subset(cor_df, abs(Correlation) >= 0.65)
+
+# Build graph object
+nodes <- data.frame(name = unique(c(edges$PlantGene, edges$MicrobeGene)))
+nodes$type <- ifelse(nodes$name %in% colnames(gene_mat), "PlantGene", "MicrobeGene")
+
+graph <- graph_from_data_frame(edges, directed = FALSE, vertices = nodes)
+graph <- delete.vertices(graph, degree(graph) == 0)
+
+# compute components and their sizes
+comp <- components(graph)         # list with $membership and $csize
+membership <- comp$membership     # integer vector length = vcount(graph)
+csize <- comp$csize               # vector of component sizes indexed by comp id
+
+# choose a minimum component size to keep (tweak as needed)
+min_comp_size <- 2
+
+# logical vector: TRUE for vertices in components larger than min_comp_size
+keep_vertex_logical <- csize[membership] > min_comp_size
+
+# convert logical into vertex sequence to keep
+keep_vertices <- V(graph)[keep_vertex_logical]
+
+# build subgraph containing only desired components
+graph_sub <- induced_subgraph(graph, vids = keep_vertices)
+
+# quick check: distribution of component sizes in subgraph
+table(components(graph_sub)$csize)
+
+tg <- as_tbl_graph(graph_sub) %>%
+  mutate(degree = centrality_degree(), component_id = group_components(),   
+         component_size = graph_size()) %>%
+  filter(component_size > 2) %>%
+  #mutate(label = ifelse(type == "MicrobeGene" & degree > 5, name, NA))
+  mutate(label = ifelse(degree > 10, name, NA))
+table(components(tg)$csize)
+
+# Plot network with layout "fr"
+set.seed(47)
+ggraph(tg, layout = "kk") +
+  geom_edge_link(aes(edge_alpha = abs(Correlation), edge_width = abs(Correlation), color = Correlation)) +
+  geom_node_point(aes(color = type, size = degree)) +
+  geom_node_text(aes(label = label), repel = TRUE, size = 6) +
+  scale_edge_color_gradient2(low = "#006401", mid = "white", high = "#F5BE61", midpoint = 0) +
+  scale_edge_alpha(range = c(0.5, 1)) +
+  scale_edge_width(range = c(0.4, 2)) +
+  scale_color_manual(values = c("PlantGene" = "cyan", "MicrobeGene" = "purple4")) +
+  scale_size_continuous(range = c(2, 8)) +
+  theme_void()
+#ggsave("./Figures/NetworkGraph_MicrobePathsVPlantGenes.pdf", width = 11, height = 17)
+
+#Same Plot in Black
+set.seed(47)
+ggraph(tg, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = abs(Correlation), edge_width = abs(Correlation), color = Correlation)) +
+  geom_node_point(aes(color = type, size = degree)) +
+  #geom_node_text(aes(label = label), repel = TRUE, size = 4, color = "white") +
+  scale_edge_color_gradient2(low = "#006401", mid = "white", high = "#F5BE61", midpoint = 0) +
+  scale_edge_alpha(range = c(0.5, 1)) +
+  scale_edge_width(range = c(0.4, 2)) +
+  scale_color_manual(values = c("PlantGene" = "cyan", "MicrobeGene" = "purple4")) +
+  scale_size_continuous(range = c(2, 8)) +
+  theme_void()+theme(
+    plot.background = element_rect(fill = "#171717", color = NA),
+    panel.background = element_rect(fill = "#171717", color = NA),
+    legend.background = element_rect(fill = "#171717", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white")
+  )
+#ggsave("./Figures/NetworkGraph_MGenesVPlantGenes_black.pdf", width = 12, height = 10)
+# Extract top connected genes and pathways for further analysis
+node_info <- as_tibble(tg) %>%
+  arrange(desc(degree))
+
+Gene_Network <- node_info %>% filter(type == "PlantGene") %>% slice_max(degree, n = 30)
+Pathways_Network <- node_info %>% filter(type == "MicrobeGene") %>% slice_max(degree, n = 30)
+```
+
+
+
+3. Elastic Net Regression (Biomass & HeatStress)
+Apply elastic net regression using scaled data to predict biomass and heat stress separately.
+
+```{r}
+#Add tag for plant or microbe: 
+rownames(Plant2_Scaled)  <- paste0("Plant_", rownames(Plant2_Scaled))
+rownames(bacteria2_Scaled) <- paste0("Microbe_", rownames(bacteria2_Scaled))
+# Prepare combined matrix for regression (scaled data)
+X_scaled <- cbind(t(Plant2_Scaled), t(bacteria2_Scaled))
+
+# Align metadata with samples in X
+meta_aligned <- MetaData[match(rownames(X_scaled), MetaData$ID2), ]
+
+# Define function to run elastic net and plot results for a given response variable
+run_elastic_net <- function(y_var, X, meta, response_label) {
+  y_vec <- meta[[y_var]]
+  features <- colnames(X)
+  
+  # Filter features by Spearman correlation p <= 0.05
+  pvals <- sapply(features, function(f) cor.test(X[, f], y_vec, method = "spearman")$p.value)
+  features_to_keep <- features[pvals <= 0.1]
+  
+  X_filtered <- as.matrix(X[, features_to_keep, drop = FALSE])
+  
+  set.seed(42)
+  cv_fit <- cv.glmnet(X_filtered, y_vec, alpha = 0.5, standardize = TRUE)
+  
+  # Extract coefficients at best lambda
+  best_lambda <- cv_fit$lambda.min
+  coefs <- coef(cv_fit, s = best_lambda)
+  coefs_df <- data.frame(
+    Feature = rownames(coefs)[which(coefs != 0)],
+    Coefficient = coefs[which(coefs != 0)],
+    stringsAsFactors = FALSE
+  )
+  coefs_df <- subset(coefs_df, Feature != "(Intercept)")
+  
+  # Annotate type
+  #coefs_df$Type <- ifelse(coefs_df$Feature %in% rownames(Plant2), "Gene", "Pathway")
+  coefs_df$Type <- ifelse(grepl("^Plant_", coefs_df$Feature), "Plant", "Microbe")
+  
+  coefs_df$Feature <- gsub("^Plant_|^Microbe_", "", coefs_df$Feature)
+  
+  # Order for plotting
+  coefs_df <- coefs_df %>%
+    mutate(Type = factor(Type, levels = c("Microbe", "Plant"))) %>%  # Pathway first
+    arrange(Type, desc(Coefficient)) %>%
+    mutate(Feature = factor(Feature, levels = rev(unique(Feature))))
+  coefs_df1<-subset(coefs_df,abs(Coefficient)>=.03)
+  
+  # Plot
+  p <- ggplot(coefs_df1, aes(x = Coefficient, y = Feature, fill = Coefficient > 0.01)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_manual(values = c("firebrick", "steelblue")) +
+    scale_y_discrete(labels = function(x) sub("^Microbe_|^Plant_", "", x)) +
+    labs(x = paste0("Effect on ", response_label), y = NULL, title = paste("Elastic Net Regression -", response_label)) +
+    geom_hline(yintercept = sum(coefs_df1$Type == "Gene") + 0.5, color = "black") +
+    theme_minimal(base_size = 15) +
+    theme(panel.grid.major.y = element_blank(), panel.grid.minor.y = element_blank())
+  
+  ggsave(paste0("./Figures/ElasticNetPATHs_", response_label, ".pdf"), plot = p, width = 13, height = 7)
+  print(p)
+  return(coefs_df)
+}
+
+# Run on Biomass
+coefs_biomass <- run_elastic_net("Biomass_Shoot", X_scaled, meta_aligned, "Biomass")
+
+# Run on HeatStress (make sure HeatStress is numeric and present in metadata)
+meta_aligned$HeatStress <- as.numeric(meta_aligned$HeatStress)
+coefs_heatstress <- run_elastic_net("HeatStress", X_scaled, meta_aligned, "HeatStress")
+
+```
+4. Random Forest (Biomass & HeatStress)
+Apply Random Forest using raw (unscaled) data to predict biomass and heat stress.
+```{r}
+# Add prefixes for tracking
+rownames(Plant_raw) <- paste0("Plant_", rownames(Plant_raw))
+rownames(bacteria_raw) <- paste0("Microbe_", rownames(bacteria_raw))
+
+# Prepare data (raw, filtered features from elastic net step)
+X_raw <- cbind(t(Plant_raw), t(bacteria_raw))
+
+# Function to run RF and plot importance
+run_rf <- function(y_var, X, meta, response_label) {
+  # Align metadata
+  meta_aligned <- meta[match(rownames(X), meta$ID2), ]
+  y_vec <- as.numeric(meta_aligned[[y_var]])
+  
+  # Spearman correlation filtering (p <= 0.05)
+  pvals <- sapply(colnames(X), function(f) {
+    cor.test(X[, f], y_vec, method = "spearman")$p.value
+  })
+  significant_features <- colnames(X)[pvals <= 0.1]
+  
+  X_filtered <- as.data.frame(X[, significant_features, drop = FALSE])
+  
+  set.seed(42)
+  train_control <- trainControl(method = "cv", number = 10)
+  
+  rf_cv <- train(
+    x = X_filtered,
+    y = y_vec,
+    method = "rf",
+    trControl = train_control,
+    importance = TRUE,
+    ntree = 2000
+  )
+  
+  importance_df <- varImp(rf_cv)$importance
+  importance_df$Feature <- rownames(importance_df)
+  #importance_df$Type <- ifelse(importance_df$Feature %in% rownames(Plant_raw), "Gene", "Pathway")
+   # Annotate Type based on prefix
+  importance_df$Type <- ifelse(grepl("^Plant_", importance_df$Feature), "Plant", "Microbe")
+  # Clean feature names
+  importance_df$Feature <- gsub("^Plant_|^Microbe_", "", importance_df$Feature)
+  
+  # Select top features for plotting
+  top_features <- importance_df %>%
+  arrange(desc(Overall)) %>%
+  group_by(Type) %>%
+  slice_max(Overall, n = 15) %>%
+  ungroup() %>%
+  mutate(PlotFeature = paste(Type, Feature, sep = "_"),   # unique for factor
+         PlotFeature = factor(PlotFeature, levels = rev(unique(PlotFeature))),
+         Label = gsub("^Plant_|^Microbe_", "", Feature)) 
+  
+  p <- ggplot(top_features, aes(x = PlotFeature, y = Overall, fill = Type)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_manual(values = c("Microbe" = "orange", "Plant" = "green4")) +
+    labs(title = paste("Random Forest Variable Importance (10-fold CV) -", response_label),
+         x = NULL, y = "Variable Importance") +
+    theme_classic() +
+    theme(text = element_text(size = 16, family = "sans"),
+          axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_y_continuous(expand = c(0, 0))+
+  scale_x_discrete(labels = top_features$Label) 
+  
+  ggsave(paste0("./Figures/RandomForest_Paths", response_label, ".pdf"), plot = p, width = 12, height = 7)
+  
+  return(importance_df)
+}
+
+# Run RF for Biomass
+rf_biomass <- run_rf("Biomass_Shoot", X_raw, MetaData, "Biomass")
+
+# Run RF for HeatStress
+rf_heatstress <- run_rf("HeatStress", X_raw, MetaData, "HeatStress")
+
+```
+5. Compile Features Present in Multiple Analyses
+Combine genes and pathways found in the network, elastic net, and random forest analyses
+```{r}
+# === Compile genes and pathways present across multiple analyses for Biomass and HeatStress ===
+
+
+# (Assuming regression and RF analyses for HeatStress have been done similarly and results saved in:)
+# Gene_Lasso_Heat, Pathway_Lasso_Heat, Gene_RF_Heat, Pathways_RF_Heat
+
+# --- 1. Network features ---
+network_feats <- bind_rows(
+  Gene_Network %>%
+    mutate(Type = "Gene", in_network = TRUE) %>%
+    dplyr::select(Feature = name, Type, network_degree = degree, in_network),
+  Pathways_Network %>%
+    mutate(Type = "Pathway", in_network = TRUE) %>%
+    dplyr::select(Feature = name, Type, network_degree = degree, in_network)
+)
+
+# --- 2. Elastic Net features ---
+enet_feats <- full_join(
+  coefs_biomass %>%
+    mutate(Type = ifelse(Feature %in% rownames(Plant2), "Plant", "Microbe"),
+           enet_coef_biomass = Coefficient,
+           in_enet_biomass = TRUE) %>%
+    dplyr::select(Feature, Type, enet_coef_biomass, in_enet_biomass),
+  coefs_heatstress %>%
+    mutate(Type = ifelse(Feature %in% rownames(Plant2), "Plant", "Microbe"),
+           enet_coef_heat = Coefficient,
+           in_enet_heat = TRUE) %>%
+    dplyr::select(Feature, Type, enet_coef_heat, in_enet_heat),
+  by = c("Feature", "Type")
+)
+
+# --- 3. Random Forest features (top 10 per type per response) ---
+rf_biomass_top <- rf_biomass %>%
+  arrange(desc(Overall)) %>%
+  group_by(Type) %>%
+  slice_head(n = 25) %>%
+  ungroup() %>%
+  mutate(rf_importance_biomass = Overall, in_rf_biomass = TRUE) %>%
+  dplyr::select(Feature, Type, rf_importance_biomass, in_rf_biomass)
+
+rf_heatstress_top <- rf_heatstress %>%
+  arrange(desc(Overall)) %>%
+  group_by(Type) %>%
+  slice_head(n = 25) %>%
+  ungroup() %>%
+  mutate(rf_importance_heat = Overall, in_rf_heat = TRUE) %>%
+  dplyr::select(Feature, Type, rf_importance_heat, in_rf_heat)
+
+rf_feats <- full_join(rf_biomass_top, rf_heatstress_top, by = c("Feature", "Type"))
+
+# --- 4. Combine all features ---
+compiled_feats <- full_join(network_feats, enet_feats, by = c("Feature", "Type")) %>%
+  full_join(rf_feats, by = c("Feature", "Type")) %>%
+  mutate(across(starts_with("in_"), ~replace_na(., FALSE)))  # Fill missing flags with FALSE
+
+compiled_feats %>%
+  summarise(
+    total_features = n(),
+    across(starts_with("in_"), sum)
+  )
+
+####Make a table of genes and pathways present in multiple: 
+# --- 1. Create a presence matrix for all features ---
+presence_matrix <- compiled_feats %>%
+  dplyr::select(Feature, Type, starts_with("in_")) %>%
+  mutate(across(starts_with("in_"), as.integer))  # convert TRUE/FALSE to 1/0
+
+# --- 2. Separate Genes and Pathways ---
+presence_matrix_P <- presence_matrix %>% filter(Type == "Plant")
+presence_matrix_M <- presence_matrix %>% filter(Type == "Microbe")
+
+# --- 3. Sum across all analyses per feature ---
+presence_matrix_P <- presence_matrix_P %>%
+  rowwise() %>%
+  mutate(Total = sum(c_across(starts_with("in_")))) %>%
+  ungroup()
+
+presence_matrix_M <- presence_matrix_M %>%
+  rowwise() %>%
+  mutate(Total = sum(c_across(starts_with("in_")))) %>%
+  ungroup()
+
+# --- 4. Filter features present in at least two analyses ---
+P_features_at_least_two <- presence_matrix_P %>% filter(Total >= 2)
+M_features_at_least_two <- presence_matrix_M %>% filter(Total >= 2)
+
+# --- 5. Print summaries ---
+cat("Pathways present in >= 2 analyses (either Biomass or HeatStress):\n")
+print(P_features_at_least_two)
+
+cat("\nGenes present in >= 2 analyses (either Biomass or HeatStress):\n")
+print(M_features_at_least_two)
+```
+
+A function to plot the classic GxE figure:
+```{r}
+plot_feature_expression <- function(Feature, X, meta_aligned) {
+  # Prepare counts
+  counts <- cbind(X, meta_aligned)
+  counts$HeatStress <- as.numeric(counts$HeatStress)
+  
+  # Rename feature column to "expression"
+  colnames(counts)[which(colnames(counts) == Feature)] <- "expression"
+  
+  # Compute means
+  counts_mean <- counts %>%
+    group_by(Genotype, Temp2, Soil) %>%
+    dplyr::summarize(expression = mean(expression, na.rm = TRUE), .groups = "drop")
+  
+  # Compute standard errors
+  counts_se <- counts %>%
+    group_by(Genotype, Temp2, Soil) %>%
+    dplyr::summarize(se = sd(expression, na.rm = TRUE) / sqrt(n()), .groups = "drop")
+  
+  # Merge SE into mean data
+  counts_mean$se <- counts_se$se
+  
+  # Soil labels
+  soil_labels <- c("Field" = "Field Soil", "Autoclaved" = "Autoclaved Soil")
+  counts_mean$Soil <- factor(counts_mean$Soil, levels = c("Autoclaved", "Field"))
+  
+  # Plot
+  ggplot(data = counts_mean, aes(x = Temp2, y = expression, color = Genotype)) +
+    geom_point(size = 4.8) +
+    geom_errorbar(aes(ymin = expression - se, ymax = expression + se), 
+                  width = 0.2, linewidth = 1, alpha = .7) + 
+    geom_line(aes(group = Genotype, color = Genotype), linewidth = 2, alpha = 0.9) +
+    theme_classic() +
+    ylab(Feature) + xlab("Temperature") +
+    facet_wrap(facets = "Soil", labeller = labeller(Soil = soil_labels)) +
+    scale_color_manual(values = c("goldenrod2", "forestgreen", "steelblue2")) +
+    theme(text = element_text(size = 16, family = "sans"), legend.position = "none")
+}
+
+# Example usage:
+# plot_feature_expression("Zm00001eb066510", X, meta_aligned)
+
+
+```
+```{r run function}
+plot_feature_expression("Zm00001eb162740", X_raw, meta_aligned)
+
+```

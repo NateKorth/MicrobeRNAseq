@@ -1,0 +1,797 @@
+---
+title: "CompareSeqTypes_HotGERMs"
+author: "Nate Korth"
+date: "2025-06-25"
+output: html_document
+---
+First library packages and read in count data and metadata:
+```{r setup,include = FALSE}
+knitr::opts_knit$set(root.dir = "~/GERMsHeatStress/")
+library(dplyr)
+library(tidyverse)
+library(ggrepel)
+library(broom)
+library(boot)
+library(pheatmap)
+library(ANCOMBC)
+library(phyloseq)
+library(ggpubr)
+
+setwd("C:/Users/njkorth/Documents/GERMsHeatStress")
+
+OTU_A<-otu_table(read.csv("./Amplicon/GenusTable_counts.csv", row.names = 1),taxa_are_rows = FALSE)
+OTU_D<-otu_table(read.csv("./AvsTvsD/ActiveGenusTable_counts.csv", row.names = 1),taxa_are_rows = FALSE)
+OTU_T<-otu_table(t(read.csv("./AvsTvsD/TranscriptomeGenusTable_counts.csv", row.names = 1)),taxa_are_rows = FALSE)
+
+meta<-read.csv("AvsTvsD/AmpliconMetaData.csv")
+
+#MetaData
+meta1<-sample_data(meta)
+sample_names(meta1)<-meta1$ID
+```
+
+Now make phyloseq objects:
+```{r}
+taxA <- as.matrix(data.frame(Genus = taxa_names(OTU_A), row.names = taxa_names(OTU_A), stringsAsFactors = FALSE))
+taxD <- as.matrix(data.frame(Genus = taxa_names(OTU_D), row.names = taxa_names(OTU_D), stringsAsFactors = FALSE))
+taxT <- as.matrix(data.frame(Genus = taxa_names(OTU_T), row.names = taxa_names(OTU_T), stringsAsFactors = FALSE))
+#Make Phyloseq objects
+psA <- phyloseq(otu_table(OTU_A, taxa_are_rows=FALSE),
+                sample_data(meta1),tax_table(taxA))
+psD <- phyloseq(otu_table(OTU_D, taxa_are_rows=FALSE),
+                sample_data(meta1),tax_table(taxD))
+psT <- phyloseq(otu_table(OTU_T, taxa_are_rows=FALSE),
+                sample_data(meta1),tax_table(taxT))
+
+#Remove Bulk soil from analysis and filter taxa
+psA_noBS <- subset_samples(psA, Genotype != "BS")
+psD_noBS <- subset_samples(psD, Genotype != "BS")
+psT_noBS <- subset_samples(psT, Genotype != "BS")
+```
+
+
+He we'll rarefy each dataset to the lowest read count which we can find using: min(sample_sums(psA_noBS))
+The minimum read count is 48357
+
+```{r}
+psA_noBS_r <- rarefy_even_depth(psA_noBS, rngseed=42, sample.size=48357, replace=F)
+psD_noBS_r <- rarefy_even_depth(psD_noBS, rngseed=42, sample.size=48357, replace=F)
+psT_noBS_r <- rarefy_even_depth(psT_noBS, rngseed=42, sample.size=48357, replace=F)
+
+#After the rarefy another trim is in order: (atleast 5 reads in two samples)
+psA_noBS_r <- filter_taxa(psA_noBS_r, function(x) sum(x > 5) >= 2, prune = TRUE)
+psD_noBS_r <- filter_taxa(psD_noBS_r, function(x) sum(x > 5) >= 2, prune = TRUE)
+psT_noBS_r <- filter_taxa(psT_noBS_r, function(x) sum(x > 5) >= 2, prune = TRUE)
+
+
+```
+Now, we'll make data compositional and perform clr normalization
+
+```{r}
+# Convert to relative abundance
+Amp_rel <- microbiome::transform(psA_noBS_r,"compositional") 
+Dorm_rel <- microbiome::transform(psD_noBS_r, "compositional")
+Trans_rel <- microbiome::transform(psT_noBS_r, "compositional")
+
+# CLR transform
+Amp_clr <- microbiome::transform(Amp_rel, "clr")
+Dorm_clr <- microbiome::transform(Dorm_rel, "clr")
+Trans_clr <- microbiome::transform(Trans_rel, "clr")
+
+Amp1<-as.data.frame(otu_table(Amp_clr))
+Dorm1<-as.data.frame(otu_table(Dorm_clr))
+Trans1<-as.data.frame(otu_table(Trans_clr))
+
+# Convert each to long format
+Amp_long <- Amp1 %>%
+  rownames_to_column("ID") %>%
+  pivot_longer(-ID, names_to = "Genus", values_to = "Amp_abundance")
+Dorm_long <- Dorm1 %>%
+  rownames_to_column("ID") %>%
+  pivot_longer(-ID, names_to = "Genus", values_to = "Dorm_abundance")
+Trans_long <- Trans1 %>%
+  rownames_to_column("ID") %>%
+  pivot_longer(-ID, names_to = "Genus", values_to = "Trans_abundance")
+
+# Join by Sample and Genus and metadata
+merged_df <- Amp_long %>%
+  inner_join(Trans_long, by = c("ID", "Genus")) 
+
+merged_df <- merged_df %>%
+  inner_join(Dorm_long, by = c("ID", "Genus")) %>%
+  inner_join(meta, by = "ID")
+```
+Let's count the number of shared taxa and the percentage of microbiome those shared taxa encompass
+```{r}
+# Find common genera (shared columns)
+shared_generaAT <- intersect(taxa_names(Amp_rel), taxa_names(Trans_rel))
+shared_generaDT <- intersect(taxa_names(Dorm_rel), taxa_names(Trans_rel))
+shared_generaAD <- intersect(taxa_names(Amp_rel), taxa_names(Dorm_rel))
+
+shared_generaADT <- intersect(shared_generaAT,taxa_names(Dorm_rel))
+
+Amp<-as.data.frame(otu_table(Amp_rel))
+Dorm<-as.data.frame(otu_table(Dorm_rel))
+Trans<-as.data.frame(otu_table(Trans_rel))
+
+# Subset both dataframes to keep only shared genera
+Amp_filtered <- Amp[, shared_generaADT]
+Trans_filtered <- Trans[, shared_generaADT]
+Dorm_filtered <- Dorm[, shared_generaADT]
+
+mean(rowSums(Amp_filtered))
+mean(rowSums(Trans_filtered))
+mean(rowSums(Dorm_filtered))
+
+```
+```{r Compare All16S and Transcriptome}
+# Plot mean values:
+# Calculate the mean abundance for each genus at given soil/temperature/Genotype
+merged_df2<-subset(merged_df,Amp_abundance!=0)
+merged_df2<-subset(merged_df2,Trans_abundance!=0)
+
+#Look at only Bulk Soil:
+#merged_df2<-subset(merged_df2,Genotype=="BS")
+
+mean_by_soil <- merged_df2 %>%
+  group_by(Soil, Genus,Temp) %>%
+  summarise(
+    Mean_Amplicon = mean(Amp_abundance, na.rm = TRUE),
+    Mean_Transcriptome = mean(Trans_abundance, na.rm = TRUE),
+    Mean_Active=mean(Dorm_abundance, na.rm = TRUE),
+    CV_Amplicon = sd(Amp_abundance, na.rm = TRUE),
+    CV_Transcriptome = sd(Trans_abundance, na.rm = TRUE),
+    CV_Active = sd(Dorm_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Add a logical column
+mean_by_soil <- mean_by_soil %>%
+  mutate(
+    BelowLine_abund = Mean_Transcriptome < Mean_Amplicon,
+    BelowLine_cv = CV_Transcriptome < CV_Amplicon
+  )
+
+fit_abund <- lm(Mean_Transcriptome ~ Mean_Amplicon,data = mean_by_soil)
+
+b_abund  <- coef(fit_abund)[2]                     # slope
+b_lab_abund<-paste0("slope = ", formatC(b_abund,digits = 2))
+se_abund <- summary(fit_abund)$coef[2, 2]          # SE
+df_abund <- df.residual(fit_abund)
+t_abund  <- (b_abund - 1) / se_abund               # test b < 1
+p_abund <- pt(t_abund,df=df_abund,lower.tail = TRUE)
+p_lab_abund <- paste0("One-sided p-value (slope < 1): ", formatC(p_abund, format = "e", digits = 2))
+
+fit_cv <- lm(CV_Transcriptome ~ CV_Amplicon,data = mean_by_soil)
+
+b_cv  <- coef(fit_cv)[2]                     # slope
+b_lab_cv<-paste0("slope = ", formatC(b_cv, digits = 2))
+se_cv <- summary(fit_cv)$coef[2, 2]          # SE
+df_cv <- df.residual(fit_cv)
+t_cv  <- (b_cv - 1) / se_cv               # test b < 1
+p_cv <- pt(t_cv,df=df_cv,lower.tail = TRUE)
+p_lab_cv <- paste0("One-sided p-value (slope < 1): ", formatC(p_cv, format = "e", digits = 2))
+
+plot_df <- mean_by_soil %>%
+  filter(is.finite(CV_Amplicon),is.finite(CV_Transcriptome),
+    !is.na(CV_Amplicon),!is.na(CV_Transcriptome)  )
+
+#if pvalue still showing 0 that mean's it's below R's lower bound so just set that as th p-value:
+#p_lab_cv <- "One-sided p-value (slope < 1): < 6.6e-312"
+
+ggplot(mean_by_soil, aes(x = Mean_Amplicon, y = Mean_Transcriptome)) +
+  geom_point(aes(color=BelowLine_abund),alpha = 0.6) +
+  scale_color_manual(values=c("orange","purple4","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Amplicon"))+
+  labs(x = "All 16S abundance", y = "Transcriptome abundance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+#  stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+#  annotate("text", x = min(mean_by_soil$Mean_Amplicon),y = max(mean_by_soil$Mean_Transcriptome+0.9),
+#           label = p_lab_abund, hjust = 0, vjust = 1, size = 4) +
+#  annotate("text", x = min(plot_df$Mean_Amplicon),y = max(plot_df$Mean_Transcriptome+.9),
+#           label = b_lab_abund, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray35",size=1.5)+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(-4, 9), ylim = c(-4, 9)) +
+  scale_x_continuous(breaks = seq(-4, 9, by = 3)) +
+  scale_y_continuous(breaks = seq(-4, 9, by = 3)) 
+
+
+
+ggsave("./Figures/AmpliconVTranscriptomeMean.pdf",width=8,height=6)
+
+
+
+ggplot(plot_df, aes(x = CV_Amplicon, y = CV_Transcriptome)) +
+  geom_point(aes(color=BelowLine_cv),alpha = 0.6) +
+  scale_color_manual(values=c("orange","purple4","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Amplicon"))+
+  labs(x = "All 16S Variance", y = "Transcriptome Variance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+#  stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+#  annotate("text", x = min(plot_df$CV_Amplicon),y = max(plot_df$CV_Transcriptome+.2),
+#           label = p_lab_cv, hjust = 0, vjust = 1, size = 4) +
+#  annotate("text", x = min(plot_df$CV_Amplicon),y = max(plot_df$CV_Transcriptome+.2),
+#           label = b_lab_cv, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1,size=1.5, intercept = 0, linetype = "dashed", color = "gray35")+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(0, 3), ylim = c(0, 3)) +
+  scale_x_continuous(breaks = seq(0, 3, by = 1)) +
+  scale_y_continuous(breaks = seq(0, 3, by = 1)) 
+ggsave("./Figures/AmpliconVTranscriptomeCV.pdf",width=8,height=6)
+#make a little bar plot to show ratios:
+counts_df_ab <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_abund, "All 16S", "Transcriptomics")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>% 
+  count(Overrepresented)
+counts_df_cv <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_cv, "All 16S", "Transcriptomics")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>%
+  filter(!is.na(Overrepresented)) %>%
+  count(Overrepresented)
+
+ggplot(counts_df_ab, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("All 16S" = "purple4", "Transcriptomics" = "orange")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+
+ggplot(counts_df_cv, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("All 16S" = "purple4", "Transcriptomics" = "orange")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+```
+
+```{r Compare Active16S and Transcriptome}
+# Plot mean values:
+# Calculate the mean abundance for each genus at given soil/temperature/Genotype
+merged_df2<-subset(merged_df,Dorm_abundance!=0)
+merged_df2<-subset(merged_df2,Trans_abundance!=0)
+
+#Look at only Bulk Soil:
+#merged_df2<-subset(merged_df2,Genotype=="BS")
+
+mean_by_soil <- merged_df2 %>%
+  group_by(Soil, Genus,Temp) %>%
+  summarise(
+    Mean_Amplicon = mean(Amp_abundance, na.rm = TRUE),
+    Mean_Transcriptome = mean(Trans_abundance, na.rm = TRUE),
+    Mean_Active=mean(Dorm_abundance, na.rm = TRUE),
+    CV_Amplicon = sd(Amp_abundance, na.rm = TRUE),
+    CV_Transcriptome = sd(Trans_abundance, na.rm = TRUE),
+    CV_Active = sd(Dorm_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Add a logical column
+mean_by_soil <- mean_by_soil %>%
+  mutate(
+    BelowLine_abund = Mean_Transcriptome < Mean_Active,
+    BelowLine_cv = CV_Transcriptome < CV_Active
+  )
+
+fit_abund <- lm(Mean_Transcriptome ~ Mean_Active,data = mean_by_soil)
+
+b_abund  <- coef(fit_abund)[2]                     # slope
+b_lab_abund<-paste0("slope = ", formatC(b_abund,digits = 2))
+se_abund <- summary(fit_abund)$coef[2, 2]          # SE
+df_abund <- df.residual(fit_abund)
+t_abund  <- (b_abund - 1) / se_abund               # test b < 1
+p_abund <- pt(t_abund,df=df_abund,lower.tail = TRUE)
+p_lab_abund <- paste0("One-sided p-value (slope < 1): ", formatC(p_abund, format = "e", digits = 2))
+
+fit_cv <- lm(CV_Transcriptome ~ CV_Active,data = mean_by_soil)
+
+b_cv  <- coef(fit_cv)[2]                     # slope
+b_lab_cv<-paste0("slope = ", formatC(b_cv, digits = 2))
+se_cv <- summary(fit_cv)$coef[2, 2]          # SE
+df_cv <- df.residual(fit_cv)
+t_cv  <- (b_cv - 1) / se_cv               # test b < 1
+p_cv <- pt(t_cv,df=df_cv,lower.tail = TRUE)
+p_lab_cv <- paste0("One-sided p-value (slope < 1): ", formatC(p_cv, format = "e", digits = 2))
+
+#if pvalue still showing 0 that mean's it's below R's lower bound so just set that as th p-value:
+#p_lab_cv <- "One-sided p-value (slope < 1): < 6.6e-312"
+
+ggplot(mean_by_soil, aes(x = Mean_Active, y = Mean_Transcriptome)) +
+  geom_point(aes(color=BelowLine_abund),alpha = 0.6) +
+  scale_color_manual(values=c("orange","forestgreen","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Active 16S"))+
+  labs(x = "Active 16S abundance", y = "Transcriptome abundance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+#  stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+#  annotate("text", x = min(mean_by_soil$Mean_Active),y = max(mean_by_soil$Mean_Transcriptome+0.9),
+#           label = p_lab_abund, hjust = 0, vjust = 1, size = 4) +
+#  annotate("text", x = min(plot_df$Mean_Active),y = max(plot_df$Mean_Transcriptome+.9),
+#           label = b_lab_abund, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray35",size=1.5)+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(-4, 9), ylim = c(-4, 9)) +
+  scale_x_continuous(breaks = seq(-4, 9, by = 3)) +
+  scale_y_continuous(breaks = seq(-4, 9, by = 3)) 
+ggsave("./Figures/ActiveVTranscriptomeMean.pdf",width=8,height=6)
+
+plot_df <- mean_by_soil %>%
+  filter(is.finite(CV_Active),is.finite(CV_Transcriptome),
+    !is.na(CV_Active),!is.na(CV_Transcriptome)  )
+
+ggplot(plot_df, aes(x = CV_Active, y = CV_Transcriptome)) +
+  geom_point(aes(color=BelowLine_cv),alpha = 0.6) +
+  scale_color_manual(values=c("orange","forestgreen","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Active 16S"))+
+  labs(x = "Active 16S Variance", y = "Transcriptome Variance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+#  stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+#  annotate("text", x = min(plot_df$CV_Active),y = max(plot_df$CV_Transcriptome+.2),
+#           label = p_lab_cv, hjust = 0, vjust = 1, size = 4) +
+#  annotate("text", x = min(plot_df$CV_Active),y = max(plot_df$CV_Transcriptome+.2),
+#           label = b_lab_cv, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1,size=1.5, intercept = 0, linetype = "dashed", color = "gray35")+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(0, 3), ylim = c(0, 3)) +
+  scale_x_continuous(breaks = seq(0, 3, by = 1)) +
+  scale_y_continuous(breaks = seq(0, 3, by = 1)) 
+ggsave("./Figures/ActiveVTranscriptomeCV.pdf",width=8,height=6)
+#make a little bar plot to show ratios:
+counts_df_ab <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_abund, "Active 16S", "Transcriptomics")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>% 
+  count(Overrepresented)
+counts_df_cv <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_cv, "Active 16S", "Transcriptomics")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>%
+  filter(!is.na(Overrepresented)) %>%
+  count(Overrepresented)
+
+ggplot(counts_df_ab, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("Active 16S" = "forestgreen", "Transcriptomics" = "orange")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+
+ggplot(counts_df_cv, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("Active 16S" = "forestgreen", "Transcriptomics" = "orange")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+```
+
+
+```{r Compare Active16S and All16S}
+# Plot mean values:
+# Calculate the mean abundance for each genus at given soil/temperature/Genotype
+merged_df2<-subset(merged_df,Amp_abundance!=0)
+merged_df2<-subset(merged_df2,Dorm_abundance!=0)
+
+#Look at only Bulk Soil:
+#merged_df2<-subset(merged_df2,Genotype=="BS")
+
+mean_by_soil <- merged_df2 %>%
+  group_by(Soil, Genus,Temp) %>%
+  summarise(
+    Mean_Amplicon = mean(Amp_abundance, na.rm = TRUE),
+    Mean_Transcriptome = mean(Trans_abundance, na.rm = TRUE),
+    Mean_Active=mean(Dorm_abundance, na.rm = TRUE),
+    CV_Amplicon = sd(Amp_abundance, na.rm = TRUE),
+    CV_Transcriptome = sd(Trans_abundance, na.rm = TRUE),
+    CV_Active = sd(Dorm_abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Add a logical column
+mean_by_soil <- mean_by_soil %>%
+  mutate(
+    BelowLine_abund = Mean_Amplicon < Mean_Active,
+    BelowLine_cv = CV_Amplicon < CV_Active
+  )
+
+fit_abund <- lm(Mean_Amplicon ~ Mean_Active,data = mean_by_soil)
+
+b_abund  <- coef(fit_abund)[2]                     # slope
+b_lab_abund<-paste0("slope = ", formatC(b_abund,digits = 2))
+se_abund <- summary(fit_abund)$coef[2, 2]          # SE
+df_abund <- df.residual(fit_abund)
+t_abund  <- (b_abund - 1) / se_abund               # test b < 1
+p_abund <- pt(t_abund,df=df_abund,lower.tail = TRUE)
+p_lab_abund <- paste0("One-sided p-value (slope < 1): ", formatC(p_abund, format = "e", digits = 2))
+
+fit_cv <- lm(CV_Amplicon ~ CV_Active,data = mean_by_soil)
+
+b_cv  <- coef(fit_cv)[2]                     # slope
+b_lab_cv<-paste0("slope = ", formatC(b_cv, digits = 2))
+se_cv <- summary(fit_cv)$coef[2, 2]          # SE
+df_cv <- df.residual(fit_cv)
+t_cv  <- (b_cv - 1) / se_cv               # test b < 1
+p_cv <- pt(t_cv,df=df_cv,lower.tail = TRUE)
+p_lab_cv <- paste0("One-sided p-value (slope < 1): ", formatC(p_cv, format = "e", digits = 2))
+
+#if pvalue still showing 0 that mean's it's below R's lower bound so just set that as th p-value:
+#p_lab_cv <- "One-sided p-value (slope < 1): < 6.6e-312"
+
+ggplot(mean_by_soil, aes(x = Mean_Active, y = Mean_Amplicon)) +
+  geom_point(aes(color=BelowLine_abund),alpha = 0.6) +
+  scale_color_manual(values=c("purple4","forestgreen","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Active 16S"))+
+  labs(x = "Active 16S abundance", y = "All 16S abundance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+#  stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+  #annotate("text", x = min(mean_by_soil$Mean_Active),y = max(mean_by_soil$Mean_Amplicon+0.9),
+  #         label = p_lab_abund, hjust = 0, vjust = 1, size = 4) +
+  #annotate("text", x = min(plot_df$Mean_Active),y = max(plot_df$Mean_Amplicon+.9),
+  #         label = b_lab_abund, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray35",size=1.5)+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(-4, 9), ylim = c(-4, 9)) +
+  scale_x_continuous(breaks = seq(-4, 9, by = 3)) +
+  scale_y_continuous(breaks = seq(-4, 9, by = 3)) 
+ggsave("./Figures/ActiveVAmpliconMean.pdf",width=8,height=6)
+
+plot_df <- mean_by_soil %>%
+  filter(is.finite(CV_Active),is.finite(CV_Amplicon),
+    !is.na(CV_Active),!is.na(CV_Amplicon)  )
+
+ggplot(plot_df, aes(x = CV_Active, y = CV_Amplicon)) +
+  geom_point(aes(color=BelowLine_cv),alpha = 0.6) +
+  scale_color_manual(values=c("purple4","forestgreen","grey","black"),name = "Overrepresented in:",labels = c("FALSE" = "Transcriptomics", "TRUE" = "Active 16S"))+
+  labs(x = "Active 16S Variance", y = "All 16S Variance") +
+  theme_classic()+theme(text = element_text(size = 22, family = "sans"))+
+  geom_smooth(method="lm", se=F,color="brown4",size=2.5,alpha=.5)+
+  #stat_cor(method="spearman",cor.coef.name="rho",label.y.npc   = 0.90)+
+  #annotate("text", x = min(plot_df$CV_Active),y = max(plot_df$CV_Amplicon+.2),
+  #         label = p_lab_cv, hjust = 0, vjust = 1, size = 4) +
+  #annotate("text", x = min(plot_df$CV_Active),y = max(plot_df$CV_Amplicon+.2),
+  #         label = b_lab_cv, hjust = 0, vjust = 2.25, size = 4) +
+  geom_abline(slope = 1,size=1.5, intercept = 0, linetype = "dashed", color = "gray35")+
+  theme(legend.position = "none")+ coord_fixed(ratio = 1, xlim = c(0, 3), ylim = c(0, 3)) +
+  scale_x_continuous(breaks = seq(0, 3, by = 1)) +
+  scale_y_continuous(breaks = seq(0, 3, by = 1)) 
+ggsave("./Figures/ActiveVAmpliconCV.pdf",width=8,height=6)
+
+#make a little bar plot to show ratios:
+counts_df_ab <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_abund, "Active 16S", "All 16S")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>% 
+  count(Overrepresented)
+counts_df_cv <- mean_by_soil %>%
+  mutate(Overrepresented = ifelse(BelowLine_cv, "Active 16S", "All 16S")) %>%
+  distinct(Soil, Genus,Temp, Overrepresented) %>%
+  filter(!is.na(Overrepresented)) %>%
+  count(Overrepresented)
+
+ggplot(counts_df_ab, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("Active 16S" = "forestgreen", "All 16S" = "purple4")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+
+ggplot(counts_df_cv, aes(x = Overrepresented, y = n, fill = Overrepresented)) +
+  geom_col(width = 0.6) +
+  labs(x = "Overrepresented in", y = "Number of taxa") +
+  scale_fill_manual(values = c("Active 16S" = "forestgreen", "All 16S" = "purple4")) +
+  scale_y_continuous(expand = c(0, 0)) +  # Remove vertical padding
+  theme_classic() +theme(text = element_text(size = 14, family = "sans"))+
+  theme(legend.position = "none")+xlab(NULL)
+```
+
+
+Now let's look at the number of genera present in each
+```{r}
+#Make a venn diagram for genera DE in temperature:
+AmpGenus<-row.names(tax_table(psA_noBS_r))
+TransGenus<-row.names(tax_table(psT_noBS_r))
+DormGenus<-row.names(tax_table(psD_noBS_r))
+
+genus_sets <- list(
+  All16S = AmpGenus,
+  Active16S=DormGenus,
+  Transcriptomics = TransGenus)
+
+# Plot
+ggvenn(genus_sets,
+       fill_color = c("", "purple4","blue2"),
+       stroke_size = 0.5,
+       set_name_size = 5,
+       text_size = 4)
+
+venn_data <- euler(genus_sets)
+
+  
+V<-plot(venn_data,
+     fills = c("purple3", "forestgreen", "orange"),
+     labels = list(font = 4),
+     quantities = TRUE)
+ggsave("../Figures/SeqTypesVenn_DownSampled.pdf",plot =V, width = 4, height = 8)
+```
+
+
+
+
+
+Now we'll use ancomm to pull the differentially abundant taxa from each dataset and compare:
+```{r Function to run Ancomm2}
+#a function to run ANCOM and to generate a dataframe of ancomm results (just a main effect comparison)
+
+#Made some edits to only test one soil condition...
+run_ancom_summary <- function(ps_object) {
+  # Run ANCOMBC2
+  ancom_out <- ancombc2(
+    data = ps_object, assay_name = "counts", tax_level = "Genus",
+    fix_formula = "Genotype+Temp*Soil",
+    #fix_formula = "Genotype+Temp",
+    p_adj_method = "BH", struc_zero = TRUE,
+    alpha = 0.05, global = TRUE, group = "Temp"
+  )
+  
+  # Extract relevant results
+  taxa_names <- ancom_out$res$taxon
+  lfc_Temp   <- ancom_out$res$`lfc_Temp38C`
+  qval_Temp  <- ancom_out$res$`q_Temp38C`
+  lfc_Soil   <- ancom_out$res$`lfc_SoilField`
+  qval_Soil  <- ancom_out$res$`q_SoilField`
+  
+  # Construct base dataframe
+  df <- tibble(Taxon = taxa_names, lfc_Temp=lfc_Temp, q_Temp=qval_Temp, lfc_Soil=lfc_Soil, q_Soil=qval_Soil) %>%
+    mutate(DE = case_when(
+        q_Temp < 0.05 & q_Soil < 0.05 ~ "Both",
+        q_Temp < 0.05 ~ "Temp",
+        q_Soil < 0.05 ~ "Soil",
+        TRUE ~ "No"
+      )
+    )
+  
+  # Calculate mean relative abundance (log10)
+  taxa_abund <- otu_table(ps_object)
+  if (taxa_are_rows(ps_object)) {
+    mean_abund <- rowMeans(taxa_abund)
+  } else {
+    mean_abund <- colMeans(taxa_abund)
+  }
+  
+  # Join abundance
+  df_abund <- tibble(Taxon = names(mean_abund),
+    MeanCount = mean_abund)
+  
+  # Merge and clean up
+  df_final <- df %>%
+    left_join(df_abund, by = "Taxon") %>%
+    mutate(MeanCount = replace_na(MeanCount, 0),
+    MeanRelAbundance = ifelse(is.infinite(MeanCount), NA, MeanCount)) #%>%
+  
+  return(df_final)
+}
+
+```
+
+Running this chunck can take a decent amount of time, best to run it on it's own
+```{r apply ancomm function}
+psA_noBS_F <- subset_samples(psA_noBS_r, Soil == "Field")
+psD_noBS_F <- subset_samples(psD_noBS_r, Soil == "Field")
+psT_noBS_F <- subset_samples(psT_noBS_r, Soil == "Field")
+#and a filter again:
+#After the rarefy another trim is in order: (atleast 5 reads in two samples)
+psA_noBS_F <- filter_taxa(psA_noBS_F, function(x) sum(x > 5) >= 2, prune = TRUE)
+psD_noBS_F <- filter_taxa(psD_noBS_F, function(x) sum(x > 5) >= 2, prune = TRUE)
+psT_noBS_F <- filter_taxa(psT_noBS_F, function(x) sum(x > 5) >= 2, prune = TRUE)
+
+dfA<-run_ancom_summary(psA_noBS_r)
+dfD<-run_ancom_summary(psD_noBS_r)
+dfT<-run_ancom_summary(psT_noBS_r)
+```
+
+
+Pull the shared differential taxa
+```{r}
+dfAsubT<-dfA %>%
+  filter(DE %in% c("Temp", "Both"))
+dfDsubT<-dfD %>%
+  filter(DE %in% c("Temp", "Both"))
+dfTsubT<-dfT %>%
+  filter(DE %in% c("Temp", "Both"))
+
+dfAsubS<-dfA %>%
+  filter(DE %in% c("Soil", "Both"))
+dfDsubS<-dfD %>%
+  filter(DE %in% c("Soil", "Both"))
+dfTsubS<-dfT %>%
+  filter(DE %in% c("Soil", "Both"))
+
+#Make a venn diagram for genera DE in temperature:
+AmpGenus1<-dfAsubT$Taxon
+TransGenus1<-dfTsubT$Taxon
+DormGenus1<-dfDsubT$Taxon
+
+genus_sets <- list(
+  All16S = AmpGenus1,
+  Transcriptomics = TransGenus1,
+  Active16S=DormGenus1
+)
+
+# Plot
+ggvenn(genus_sets,
+       fill_color = c("purple4", "orange","forestgreen"),
+       stroke_size = 0.5,
+       set_name_size = 5,
+       text_size = 4)
+
+venn_data <- euler(genus_sets)
+
+plot(venn_data,
+     fills = c("purple3", "orange", "forestgreen"),
+     labels = list(font = 4),
+     quantities = TRUE)
+
+shared_taxaT <- Reduce(intersect, list(dfAsubT$Taxon, dfDsubT$Taxon, dfTsubT$Taxon))
+shared_taxaS <- Reduce(intersect, list(dfAsubS$Taxon, dfDsubS$Taxon, dfTsubS$Taxon))
+
+dfA_sharedT <- dfA %>%
+  filter(Taxon %in% shared_taxaT)
+dfT_sharedT <- dfT %>%
+  filter(Taxon %in% shared_taxaT)
+dfD_sharedT <- dfD %>%
+  filter(Taxon %in% shared_taxaT)
+
+dfA_sharedS <- dfA %>%
+  filter(Taxon %in% shared_taxaS)
+dfT_sharedS <- dfT %>%
+  filter(Taxon %in% shared_taxaS)
+dfD_sharedS <- dfD %>%
+  filter(Taxon %in% shared_taxaS)
+```
+
+
+```{r prep data for visualization}
+# Convert to relative abundance
+Amp_rel <- microbiome::transform(psA_noBS, "compositional") 
+Dorm_rel <- microbiome::transform(psD_noBS, "compositional")
+Trans_rel <- microbiome::transform(psT_noBS, "compositional")
+
+# CLR transform
+Amp_clr <- microbiome::transform(Amp_rel, "clr")
+Dorm_clr <- microbiome::transform(Dorm_rel, "clr")
+Trans_clr <- microbiome::transform(Trans_rel, "clr")
+
+Amp1<-as.data.frame(otu_table(Amp_clr))
+Dorm1<-as.data.frame(otu_table(Dorm_clr))
+Trans1<-as.data.frame(otu_table(Trans_clr))
+
+Amp1$ID <- rownames(Amp1)
+Dorm1$ID <- rownames(Dorm1)
+Trans1$ID <- rownames(Trans1)
+
+Amp1 <- Amp1 %>% inner_join(meta, by = "ID")
+Dorm1 <- Dorm1 %>% inner_join(meta, by = "ID")
+Trans1 <- Trans1 %>% inner_join(meta, by = "ID")
+```
+
+```{r a function to plot classic gxe figure}
+plot_taxa_across_datasets <- function(taxaofinterest) {
+  
+  make_taxa_plot <- function(data, dataset_label) {
+    # Rename the selected column to "taxa" and make numeric
+    data$taxa <- as.numeric(data[[taxaofinterest]])
+    
+    # Mean values per group
+    counts_mean <- data %>%
+      group_by(Genotype, Temp, Soil) %>%
+      summarise(taxa = mean(taxa, na.rm = TRUE), .groups = "drop")
+    
+    # SE values per group
+    counts_se <- data %>%
+      group_by(Genotype, Temp, Soil) %>%
+      summarise(se = sd(taxa, na.rm = TRUE) / sqrt(n()), .groups = "drop")
+    
+    counts_mean$se <- counts_se$se
+    counts_mean$Soil <- factor(counts_mean$Soil, levels = c("Autoclaved", "Field"))
+    
+    # Plot
+    ggplot(counts_mean, aes(x = Temp, y = taxa, color = Genotype)) +
+      geom_point(size = 4.8) + 
+      geom_errorbar(aes(ymin = taxa - se, ymax = taxa + se), 
+                    width = 0.2, linewidth = 1, alpha = 0.7) + 
+      geom_line(aes(group = Genotype), linewidth = 2, alpha = 0.9) +
+      facet_wrap(~Soil, labeller = labeller(Soil = c("Field" = "Field Soil", "Autoclaved" = "Autoclaved Soil"))) +
+      scale_color_manual(values = c("goldenrod2", "forestgreen", "steelblue2")) +
+      labs(title = dataset_label, y = taxaofinterest, x = "Temperature") +
+      theme_classic(base_size = 14) +
+      theme(legend.position = "none")
+  }
+  
+  # Generate plots
+  p_amp <- make_taxa_plot(Amp1, "All16S")
+  p_dorm <- make_taxa_plot(Dorm1, "Active16S")
+  p_trans <- make_taxa_plot(Trans1, "Transcriptome")
+  
+  # Combine vertically
+  ggarrange(p_amp, p_dorm, p_trans, ncol = 1, nrow = 3, 
+            labels = c("A", "B", "C"))
+}
+```
+
+Apply function to taxa of interest:
+```{r}
+plot_taxa_across_datasets("Pandoraea")
+```
+
+```{r HeatMap Temp}
+dfA_sharedT <- dfA %>% mutate(Method = "All16S")
+dfD_sharedT <- dfD %>% mutate(Method = "Active16S")
+dfT_sharedT <- dfT %>% mutate(Method = "Transcriptome")
+
+combined_df<-bind_rows(dfA_sharedT,dfD_sharedT,dfT_sharedT)
+
+# Pivot longer so we can separate lfc_temp and lfc_soil as "measurements"
+heatmap_df <- combined_df %>%
+  pivot_longer(cols = c(lfc_Temp),
+  names_to = "Condition",values_to = "LFC") %>%
+  mutate(HeatmapCol = paste(Method))
+
+heatmap_matrix <- heatmap_df %>%
+  select(Taxon, HeatmapCol, LFC) %>%
+  pivot_wider(names_from = HeatmapCol, values_from = LFC) %>%
+  column_to_rownames("Taxon") %>%
+  as.matrix()
+# Identify how many NAs are in each row
+na_counts <- rowSums(is.na(heatmap_matrix))
+# Keep rows with at most 1 NA
+heatmap_matrix_filtered <- heatmap_matrix[na_counts <= 1, ]
+
+# Replace any remaining NAs (i.e., rows with exactly 1 NA) with 0
+heatmap_matrix_filtered[is.na(heatmap_matrix_filtered)] <- 0
+
+
+pheatmap(heatmap_matrix_filtered,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         color = colorRampPalette(c("darkblue", "white", "firebrick"))(100),
+         main = "Log Fold Change Heatmap",
+         show_rownames = FALSE,
+         fontsize_col = 8,
+         scale = "column",
+         border_color = NA)
+```
+
+```{r HeatMap Soil}
+dfA_sharedS <- dfA %>% mutate(Method = "All16S")
+dfD_sharedS <- dfD %>% mutate(Method = "Active16S")
+dfT_sharedS <- dfT %>% mutate(Method = "Transcriptome")
+
+combined_df<-bind_rows(dfA_sharedS,dfD_sharedS,dfT_sharedS)
+
+# Pivot longer so we can separate lfc_temp and lfc_soil as "measurements"
+heatmap_df <- combined_df %>%
+  pivot_longer(cols = c(lfc_Soil),
+  names_to = "Condition",values_to = "LFC") %>%
+  mutate(HeatmapCol = paste(Method))
+
+heatmap_matrix <- heatmap_df %>%
+  select(Taxon, HeatmapCol, LFC) %>%
+  pivot_wider(names_from = HeatmapCol, values_from = LFC) %>%
+  column_to_rownames("Taxon") %>%
+  as.matrix()
+
+# Identify how many NAs are in each row
+na_counts <- rowSums(is.na(heatmap_matrix))
+# Keep rows with at most 1 NA
+heatmap_matrix_filtered <- heatmap_matrix[na_counts <= 1, ]
+
+# Replace any remaining NAs (i.e., rows with exactly 1 NA) with 0
+heatmap_matrix_filtered[is.na(heatmap_matrix_filtered)] <- 0
+
+pheatmap(heatmap_matrix_filtered,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         scale="column",
+         color = colorRampPalette(c("brown3", "white", "purple2"))(100),
+         main = "Log Fold Change Heatmap",
+         show_rownames = FALSE,
+         fontsize_col = 15,
+         border_color = NA)
+```
+
+

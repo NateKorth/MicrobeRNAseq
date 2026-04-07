@@ -1,0 +1,862 @@
+---
+title: "MicrobiomeFunctionAnalysis"
+author: "Nate Korth"
+date: "2025-09-04"
+output: html_document
+---
+
+First library packages and read in count data and metadata:
+```{r setup,include = FALSE}
+knitr::opts_knit$set(root.dir = "~/GERMsHeatStress/")
+setwd("~/GERMsHeatStress/")
+library(tidyverse)
+library(ggplot2)
+library(KEGGREST)
+library(readxl)
+library(ggpubr)
+library(DESeq2)
+library(vegan)
+#library(Maaslin2)
+library(pheatmap)
+library(DESeq2)
+library(data.table)
+library(ALDEx2)
+library(dplyr)
+library(tidyr)
+library(compositions)
+```
+
+This code is to analyze functional pathways (KEGG pathways) annotated from EggNOG
+
+Step1. Read in data:
+The first loop pulls both raw counts and percentages and drops into one dataframe
+Next pull the raw counts and format for Maaslin anlysis
+
+```{}
+#List of all the annotation output files:
+bfiles0<-list.files("./AnnotationOutputs/",pattern = "*Bacteria*",full.names = F)
+
+df0<-NULL
+
+for (csv in bfiles0) {
+  df <- read.csv(paste0("./AnnotationOutputs/",csv), head = TRUE)
+  names(df)<-c("PathwaySimple",paste0(sub("_maizeremoved_F.fastq.emapper.annotations_Bacteria.csv","",basename(csv)),"_totalCount"),paste0(sub("_maizeremoved_F.fastq.emapper.annotations_Bacteria.csv","",basename(csv)),"_PCT"))
+  if (is.null(df0)) {
+  df0 <- df  # First file initializes the dataframe
+  } else {
+    df0 <- merge(df0, df, by = "PathwaySimple", all = TRUE)  # Use all=TRUE for NA handling
+  }
+}
+
+df1<-as.data.frame(t(df0))
+names(df1)<-df1[1,]
+df1<-df1[-1,]
+
+df1[] <- lapply(df1, function(x) as.numeric(as.character(x)))
+
+#Import Metadata:
+MetaData<-read_excel("HotGERMs_SampleSelection.xlsx",sheet = "Sheet2")
+rownames(MetaData)<-MetaData$ID2
+
+#subset only sequenced samples
+MetaData<-subset(MetaData,Sequenced=="Yes")
+rownames(MetaData)<-MetaData$ID2
+
+#Trim MetaData
+MetaDataTrim<-MetaData[5:9]
+MetaDataTrim$Temp<-NULL
+
+#Pull only the percentage of reads from dataframe
+df1_Percent <- df1[seq(2, nrow(df1), by = 2), ]
+
+df1_Percent$ID2 <- gsub("_Bacteria.csv_PCT","",rownames(df1_Percent))
+df1_Percent1<-merge(df1_Percent,MetaDataTrim)
+
+df1_PercentT<-t(df1_Percent[-1])
+
+#Pull Raw Counts for downstream analysis
+pathwaycounts<-df0[, !grepl("PCT$", colnames(df0))]
+
+# Remove unwanted pathways (a few human things that slipped through the cracks)
+unwanted <- c("Melanogenesis", "Rheumatoid arthritis","Bile secretion","Meiosis  yeast","p53 signaling pathway","Photosynthesis","MAPK signaling pathway  yeast","Primary bile acid biosynthesis")
+pathwaycounts <- subset(pathwaycounts, !(PathwaySimple %in% unwanted))
+
+pathwaycountsMat <- as.matrix(pathwaycounts[-c(1)])
+row.names(pathwaycountsMat)<-pathwaycounts$PathwaySimple
+
+rownames(MetaDataTrim)<-MetaDataTrim$ID2
+
+#Change column names:
+colnames(pathwaycountsMat)<- gsub("_Bacteria.csv_totalCount","",colnames(pathwaycountsMat))
+
+#reorder the count data to match the metadata
+pathwaycountsMat <- pathwaycountsMat[, rownames(MetaDataTrim)]
+
+#Change "NA" to 0
+pathwaycountsMat[is.na(pathwaycountsMat)] <- 0
+```
+
+
+```{ Add for fungi}
+#List of all the annotation output files:
+ffiles0<-list.files("./AnnotationOutputs/",pattern = "*Fungi*",full.names = F)
+
+df0<-NULL
+
+for (csv in ffiles0) {
+  df <- read.csv(paste0("./AnnotationOutputs/",csv), head = TRUE)
+  names(df)<-c("PathwaySimple",paste0(sub("_maizeremoved_F.fastq.emapper.annotations_Fungi.csv","",basename(csv)),"_totalCount"),paste0(sub("_maizeremoved_F.fastq.emapper.annotations_Fungi.csv","",basename(csv)),"_PCT"))
+  if (is.null(df0)) {
+    df0 <- df  # First file initializes the dataframe
+  } else {
+    df0 <- merge(df0, df, by = "PathwaySimple", all = TRUE)  # Use all=TRUE for NA handling
+  }
+}
+
+df1<-as.data.frame(t(df0))
+names(df1)<-df1[1,]
+df1<-df1[-1,]
+
+df1[] <- lapply(df1, function(x) as.numeric(as.character(x)))
+
+#Import Metadata:
+MetaData<-read_excel("HotGERMs_SampleSelection.xlsx",sheet = "Sheet2")
+rownames(MetaData)<-MetaData$ID2
+
+#subset only sequenced samples
+MetaData<-subset(MetaData,Sequenced=="Yes")
+rownames(MetaData)<-MetaData$ID2
+
+#Trim MetaData
+MetaDataTrim<-MetaData[5:9]
+MetaDataTrim$Temp<-NULL
+
+#Pull only the percentage of reads from dataframe
+df1_Percent <- df1[seq(2, nrow(df1), by = 2), ]
+
+df1_Percent$ID2 <- gsub("_Fungi.csv_PCT","",rownames(df1_Percent))
+df1_Percent1<-merge(df1_Percent,MetaDataTrim)
+
+df1_PercentT<-t(df1_Percent[-1])
+
+#Pull Raw Counts for downstream analysis
+pathwaycounts<-df0[, !grepl("PCT$", colnames(df0))]
+
+# Remove unwanted pathways (a few human things that slipped through the cracks)
+unwanted <- c("Melanogenesis", "Rheumatoid arthritis","Bile secretion","p53 signaling pathway","Photosynthesis")
+pathwaycounts <- subset(pathwaycounts, !(PathwaySimple %in% unwanted))
+
+pathwaycountsMat <- as.matrix(pathwaycounts[-c(1)])
+row.names(pathwaycountsMat)<-pathwaycounts$PathwaySimple
+
+rownames(MetaDataTrim)<-MetaDataTrim$ID2
+
+#Change column names:
+colnames(pathwaycountsMat)<- gsub("_Fungi.csv_totalCount","",colnames(pathwaycountsMat))
+
+#reorder the count data to match the metadata
+pathwaycountsMat <- pathwaycountsMat[, rownames(MetaDataTrim)]
+
+#Change "NA" to 0
+pathwaycountsMat[is.na(pathwaycountsMat)] <- 0
+```
+
+Import Single gene information:
+```{r}
+GeneCounts<-read.csv("AnnotationOutputs/GeneCounts/Microbe_Genes_counts.csv")
+GeneCounts$AllSamples<-NULL
+# identify which columns are counts (everything except metadata)
+count_cols <- grep("emapper.annotations", colnames(GeneCounts), value = TRUE)
+
+sample_cols <- setdiff(colnames(GeneCounts), c("X","taxa2", "name", "pathway_EC"))
+
+setDT(GeneCounts)
+#Further combine genes that have same name/taxa
+GeneCounts1 <- GeneCounts[, lapply(.SD, sum, na.rm = TRUE),
+                        by = .(taxa2, name),
+                        .SDcols = sample_cols]
+
+
+# filter: keep rows with at least 75 counts in >= 4 samples
+#GeneCounts_filt <- GeneCounts1 %>%
+#  filter(rowSums(across(all_of(count_cols), ~ .x >=250)) >= 4)
+GeneCounts_filt <- GeneCounts1 %>%
+  filter(rowSums(across(all_of(count_cols), ~ .x >=20)) >= 2)
+
+
+#If including taxa info:
+GeneCounts_filt <- GeneCounts_filt %>%
+  mutate(Gene = paste(taxa2, name, sep = "-")) %>%
+  dplyr::select(Gene, everything())
+
+count_mat <- GeneCounts_filt %>%
+  dplyr::select(-Gene, -taxa2, -name,) %>%  # drop non-numeric metadata
+  mutate(across(everything(), as.numeric)) %>% 
+  as.matrix()
+
+rownames(count_mat) <- GeneCounts_filt$Gene
+
+#If looking at collapsed genes:
+#GeneCounts_filt$x<-NULL
+#count_mat <- GeneCounts_filt %>%
+#  select(-name) %>%  # drop non-numeric metadata
+#  mutate(across(everything(), as.numeric)) %>% 
+#  as.matrix()
+#rownames(count_mat) <- GeneCounts_filt$name
+
+colnames(count_mat)<- gsub("\\.emapper\\.annotations$","",colnames(count_mat))
+
+#Import Metadata:
+MetaData<-read_excel("HotGERMs_SampleSelection.xlsx",sheet = "Sheet2")
+rownames(MetaData)<-MetaData$ID2
+
+#subset only sequenced samples
+MetaData<-subset(MetaData,Sequenced=="Yes")
+rownames(MetaData)<-MetaData$ID2
+
+#Trim MetaData
+MetaDataTrim<-MetaData[5:9]
+MetaDataTrim$Temp<-NULL
+MetaDataTrim$Biomass<-MetaData$`Biomass(Shoot)`
+MetaDataTrim$HeatStress<-MetaData$HeatStress
+```
+
+
+```{r plot alpha diversity metrics}
+# Transpose the data so that rows = samples and columns = genes/taxa
+count_matrix <- t(count_mat)
+
+# 2. Calculate Alpha Diversity Metrics
+# Calculate Shannon diversity and Richness (number of observed features)
+alpha_df <- data.frame(
+  ID2 = rownames(count_matrix),
+  Shannon = vegan::diversity(count_matrix, index = "shannon"),
+  Richness = specnumber(count_matrix)
+)
+
+# 3. Merge with Metadata and Pivot Long
+# Join with MetaDataTrim and pivot so we can plot both metrics easily
+plot_data <- MetaDataTrim %>%
+  inner_join(alpha_df, by = "ID2") %>%
+  filter(Genotype != "BS") %>%
+  pivot_longer(
+    cols = c(Shannon, Richness),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  # Rename the levels here so the rest of the script uses the new names
+  mutate(Soil = recode(Soil, "Autoclaved" = "Depleted", "Field" = "Intact"))
+
+# 4. Generate the Plot
+ggplot(plot_data, aes(x = Soil, y = Value, fill = Soil)) +
+  geom_violin(trim = FALSE, alpha = 0.8, color = "black") +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black", alpha = 0.6) +
+  # Using the colors from your template
+  scale_fill_manual(values = c("Depleted" = "#3C1A42FF", "Intact" = "#ED4E3EFF")) +
+  theme_classic(base_size = 16) +
+  # Facet by metric to show Shannon and Richness side-by-side
+  facet_wrap(~ Metric, scales = "free_y") + 
+  labs(
+    x = "Microbiome Complexity",
+    y = "Alpha Diversity",
+    fill = "Soil Type",
+    title = "Wilcoxon test for Microbial Functional Diversity"
+  ) +
+  stat_compare_means(
+    comparisons = list(c("Depleted", "Intact")),
+    method = "wilcox.test",
+    size = 4.3,
+    label = "p.format",  
+    vjust = -0.71
+  )
+
+ggsave("./Revision1Files/FunctionalDiversity_AutoclavedVsField.jpeg",dpi=400)
+
+#Make a venn diagram:
+library(VennDiagram)
+filtered_meta <- MetaDataTrim %>% filter(Genotype != "BS")
+depleted_ids <- filtered_meta %>% filter(Soil == "Autoclaved") %>% pull(ID2)
+intact_ids   <- filtered_meta %>% filter(Soil == "Field") %>% pull(ID2)
+
+depleted_features <- rownames(count_mat)[rowSums(count_mat[, depleted_ids, drop=FALSE]) > 0]
+intact_features   <- rownames(count_mat)[rowSums(count_mat[, intact_ids, drop=FALSE]) > 0]
+
+venn_list <- list(
+  Depleted = depleted_features,
+  Intact = intact_features
+)
+
+venn.plot <- venn.diagram(
+  x = venn_list,
+  category.names = c("Depleted", "Intact"),
+  filename = "./Revision1Files/Venn_Transcript_Overlap.png",
+  output = TRUE,
+  
+  # Visual Customization matching your violin plot colors
+  fill = c("#3C1A42FF", "#ED4E3EFF"),
+  alpha = 0.60,
+  col = "black",        # Border color
+  lwd = 2,              # Border width
+  
+  # Text styling
+  cex = 2,              # Number size
+  fontface = "bold",
+  cat.cex = 2,          # Category name size
+  cat.default.pos = "outer",
+  cat.pos = c(-20, 20), # Positioning of labels
+  cat.dist = c(0.05, 0.05),
+  
+  main = "Overlap of Unique Transcripts",
+  main.cex = 1.5
+)
+```
+Now we'll use MaAsLin2 to pick out important pathways:
+
+```{}
+#Remove lowly expressed pathways:
+pathwaycountsMatTrim<- count_mat[rowMeans(count_mat) >= 45, ]
+dim(count_mat)
+dim(pathwaycountsMatTrim)
+# Transpose features: MaAsLin2 expects features as rows (samples) × columns (features)
+features_t <- as.data.frame(t(pathwaycountsMatTrim))
+
+# Confirm rownames match
+MetaDataTrim <- as.data.frame(MetaDataTrim)
+MetaDataTrim$Biomass<-as.numeric(MetaData$`Biomass(Shoot)`)
+MetaDataTrim$HeatStress<-as.numeric(MetaData$HeatStress)
+rownames(MetaDataTrim)<-MetaData$ID2
+MetaDataTrim <- MetaDataTrim[rownames(features_t), , drop = FALSE]
+
+#Specify interactionterms:
+MetaDataTrim$Soil_Temp2 <- interaction(MetaDataTrim$Soil, MetaDataTrim$Temp2)
+MetaDataTrim$Soil_Genotype <- interaction(MetaDataTrim$Soil, MetaDataTrim$Genotype)
+MetaDataTrim$Temp2_Genotype <- interaction(MetaDataTrim$Temp2, MetaDataTrim$Genotype)
+MetaDataTrim$Soil_Temp2_Genotype <- interaction(MetaDataTrim$Soil,MetaDataTrim$Temp2, MetaDataTrim$Genotype)
+
+#Remove BulkSoil for maaslin analysis:
+features_t$Genotype<-MetaDataTrim$Genotype
+features_t_Sub<-subset(features_t,Genotype!="BS")
+features_t_Sub$Genotype<-NULL
+MetaDataTrim_Sub<-subset(MetaDataTrim,Genotype!="BS")
+
+rownames(MetaDataTrim_Sub) == rownames(features_t_Sub)
+rownames(MetaDataTrim) == rownames(features_t)
+
+fit_data <- Maaslin2(
+  input_data = features_t_Sub,
+  input_metadata = MetaDataTrim_Sub,
+  output = "maaslin2_output",
+  fixed_effects = c("Soil", "Temp2", "Genotype", "Soil_Temp2","Soil_Temp2_Genotype"),
+  normalization = "TSS",      # total sum scaling (adjust if already normalized)
+  transform = "LOG",          # log transformation (or "NONE" if already log)
+  analysis_method = "LM",     # linear model
+  max_significance = 0.05,
+  reference = c("Genotype,CML103"),
+)
+
+unlink("maaslin2_output/plots", recursive = TRUE)
+```
+
+Look at Maaslin Output:
+```{}
+# Read in the Maaslin results
+sig_res <- read.delim("maaslin2_output/all_results.tsv", stringsAsFactors = FALSE)
+
+sig_res$feature <- factor(sig_res$feature, levels = unique(sig_res$feature[order(sig_res$coef)]))
+
+sig_resHT<-sig_res %>% filter(qval < 0.05)
+
+# Combine metadata and value for grouping labels
+sig_resHT$group <- paste(sig_resHT$metadata, sig_resHT$value, sep = ":")
+
+# Create a unique ID for each feature-metadata combo
+sig_resHT <- sig_resHT %>%
+  mutate(feature_meta = paste(metadata, feature, sep = "__"))
+
+sig_resHT <- sig_resHT %>%
+  group_by(metadata) %>%
+  arrange(coef, .by_group = TRUE) %>%
+  mutate(feature_ordered = factor(feature_meta, levels = unique(feature_meta))) %>%
+  ungroup()
+
+#For now, exclude the interactions and genotype effect:
+sig_resHT <- subset(sig_resHT, !grepl("_", metadata))
+#sig_resHT <- subset(sig_resHT, !grepl("Genotype", metadata))
+
+# Plot
+ggplot(sig_resHT, aes(x = coef, y = feature_ordered, color = metadata)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = coef - stderr, xmax = coef + stderr), height = .3, size = 0.8) + 
+  theme_classic() +
+  labs(x = "Effect Size (Coefficient)", y = "Microbial Gene") +
+  theme(text = element_text(size = 16, family = "sans"),strip.text = element_text(face = "bold"),legend.background = element_blank(),legend.position = c(0.12, 0.6),legend.box.background = element_rect(color = "black"),axis.text.y = element_blank() ) +
+  scale_y_discrete(labels = function(x){ x<-gsub(".*__", "", x)
+    x<-gsub("\\.", " ", x) 
+    return(x)}) +  # Clean y-axis labels
+  scale_color_brewer(palette = "Dark2",
+                     labels = c("Soil" = "Soil Type", 
+                                "Temp2" = "Temperature",
+                                "Genotype" = "Genotype"))+ 
+  scale_y_discrete(expand = expansion(mult = c(0, 0.01)))
+
+ggsave("./Figures/SoilAndTempMaaslinOutput_Genes2.pdf",width=16,height=12)
+
+
+
+```
+
+```{r a function to plot classic gxe figure}
+#Pull normalized data from Maaslin for plotting:
+norm_data <- read.table("./maaslin2_output/features/filtered_data_norm.tsv", header = TRUE, row.names = 1, sep = "\t")
+#norm_data<-cbind(norm_data,MetaDataTrim_Sub)
+
+library(compositions)
+#apply clr normalization
+#norm_data<-subset(df1_Percent1,Genotype!="BS")
+#numeric_cols <- sapply(norm_data, is.numeric)
+#norm_data_clr<-as.data.frame(clr(norm_data[, numeric_cols] + 1e-6))
+#norm_data <- bind_cols(norm_data[, !numeric_cols], norm_data_clr)
+
+
+plot_taxa_across_datasets <- function(pathwayofinterest) {
+    # Rename the selected column to "taxa" and make numeric
+    df_temp <- norm_data %>% mutate(taxa = as.numeric(.data[[pathwayofinterest]]))
+    
+    # Mean values per group
+    counts_mean <- df_temp %>%
+      group_by(Genotype, Temp2, Soil) %>%
+      summarise(taxa = mean(taxa, na.rm = TRUE), .groups = "drop")
+    
+    # SE values per group
+    counts_se <- df_temp %>%
+      group_by(Genotype, Temp2, Soil) %>%
+      summarise(se = sd(taxa, na.rm = TRUE) / sqrt(n()), .groups = "drop")
+    
+    counts_mean$se <- counts_se$se
+    counts_mean$Soil <- factor(counts_mean$Soil, levels = c("Autoclaved", "Field"))
+    
+    # Plot
+    ggplot(counts_mean, aes(x = Temp2, y = taxa, color = Genotype)) +
+      geom_point(size = 4.8) + 
+      geom_errorbar(aes(ymin = taxa - se, ymax = taxa + se), 
+                    width = 0.2, linewidth = 1, alpha = 0.7) + 
+      geom_line(aes(group = Genotype), linewidth = 2, alpha = 0.9) +
+      facet_wrap(~Soil, labeller = labeller(Soil = c("Field" = "Field Soil", "Autoclaved" = "Autoclaved Soil"))) +
+      scale_color_manual(values = c("goldenrod2", "forestgreen", "steelblue2")) +
+      labs(y = pathwayofinterest, x = "Temperature") +
+      theme_classic(base_size = 14) +
+      theme(legend.position = "none")
+ }
+```
+
+Apply function to taxa of interest:
+```{r}
+plot_taxa_across_datasets("brla")
+```
+
+```{r DEseq}
+MetaDataTrim2<-subset(MetaDataTrim,Genotype!="BS")
+MetaDataTrim2$Group <- with(MetaDataTrim2, paste(Genotype, Soil, sep = "_"))
+samples_keep <- MetaDataTrim2$ID2
+count_mat <- count_mat[, colnames(count_mat) != "X", drop = FALSE]
+count_mat_filtered <- count_mat[, colnames(count_mat) %in% samples_keep, drop = FALSE]
+
+dds <- DESeqDataSetFromMatrix(countData = count_mat_filtered,
+       colData = MetaDataTrim2,
+       design = ~Genotype + Temp2 + Soil+Temp2:Soil)
+
+dds <- DESeq(dds)
+
+# Now extract log2FC for Temp2 within each Group using contrasts.
+# This example constructs contrasts for each Group (GroupX at 38C vs 28C)
+groups <- unique(MetaDataTrim2$Group)
+res_list <- lapply(groups, function(g) {
+  
+  # Subset dds to only samples in this group
+  dds_sub <- dds[, dds$Group == g]
+  dds_sub$Temp2 <- droplevels(dds_sub$Temp2)
+  design(dds_sub) <- ~ Temp2
+  
+  dds_sub <- DESeq(dds_sub)
+  
+  # Get Temp2 effect
+  res <- results(dds_sub, contrast = c("Temp2", "38C", "28C"))
+  
+  # Return log2FC and adjusted p-values
+  res_df <- as.data.frame(res)[, c("log2FoldChange", "padj")]
+  colnames(res_df) <- c(paste0(g, "_LFC"), paste0(g, "_padj"))
+  
+  return(res_df)
+})
+
+# Combine results into a single matrix for heatmap
+DE_matrix <- do.call(cbind, res_list)
+lfc_mat <- DE_matrix[, grepl("_LFC$", colnames(DE_matrix)), drop = FALSE]
+padj_mat <- DE_matrix[, grepl("_padj$", colnames(DE_matrix)), drop = FALSE]
+
+# Filter: keep genes with padj < 0.05 in at least one comparison
+keep_genes <- apply(padj_mat, 1, function(x) any(x < 0.01, na.rm = TRUE))
+lfc_filtered <- lfc_mat[keep_genes, ]
+
+# Convert to matrix
+lfc_matrix <- as.matrix(lfc_filtered)
+
+
+# Then pheatmap(res_mat)
+pheatmap(lfc_matrix,
+         scale = "row",                 # row-scale expression
+         clustering_method = "ward.D2",
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         show_colnames = TRUE,
+         show_rownames = FALSE,         # hide row names if too many
+         fontsize_col = 10,
+         color = colorRampPalette(c("darkorchid4", "grey99", "indianred2"))(50))
+```
+
+Check PCA
+```{r}
+mat <- as.matrix(GeneCounts_filt[, sample_cols, with = FALSE])
+rownames(mat) <- paste(GeneCounts_filt$taxa, GeneCounts_filt$name, sep = "_")
+colnames(mat)<- gsub("\\.emapper\\.annotations$","",colnames(mat))
+# --- CLR transform ---
+# Transpose first so rows = samples, cols = features
+mat_t <- t(mat)
+# Convert counts to relative abundance per sample
+mat_rel <- mat_t / rowSums(mat_t)
+
+mat_clr <- clr(mat_rel)   # compositions::clr expects samples x features
+
+# --- PCA ---
+pca <- prcomp(mat_clr, center = TRUE, scale. = FALSE)
+
+# --- Extract scores for plotting ---
+pca_df <- as.data.frame(pca$x)
+
+# Bring in sample metadata (e.g., Genotype, Soil, Temp2)
+pca_df$ID2 <- rownames(pca_df)
+pca_df <- merge(pca_df, MetaDataTrim2, by = "ID2")
+
+pca_df$Biomass<-as.numeric(pca_df$Biomass)
+
+# --- Plot ---
+ggplot(pca_df, aes(x = PC1, y = PC2, color = Soil, shape = Temp2)) +
+  geom_point(size = 4.5,alpha=.85) +
+  theme_classic(base_size = 19) +
+  scale_color_manual(values = c("#400F73FF", "#FA815FFF", "steelblue2")) +
+  #scale_color_manual(values = c("darkgreen", "green", "yellow","orange","red")) +
+  #scale_color_viridis_c(option = "plasma") +
+  labs(x = paste0("PC1 (", round(100*summary(pca)$importance[2,1], 1), "%)"),
+       y = paste0("PC2 (", round(100*summary(pca)$importance[2,2], 1), "%)"),
+       shape = "Temperature")
+ggsave("../Figures/MicrobeGenesPCA.pdf",width=9,height=4.4)
+```
+
+Using ALDEx2 let's try a different DE analysis:
+```{}
+# Make sure metadata matches count matrix
+MetaDataTrim2 <- subset(MetaDataTrim, Genotype != "BS")
+MetaDataTrim2$Group <- paste(MetaDataTrim2$Genotype, MetaDataTrim2$Soil, sep = "_")
+samples_keep <- intersect(colnames(count_mat), MetaDataTrim2$ID2)
+
+count_sub <- count_mat[, samples_keep, drop = FALSE]
+meta_sub  <- MetaDataTrim2 %>% filter(ID2 %in% samples_keep) %>%
+  arrange(match(ID2, colnames(count_sub)))
+rownames(meta_sub) <- meta_sub$ID2
+
+stopifnot(all(colnames(count_sub) == rownames(meta_sub)))
+
+mm <- model.matrix(~ Temp2 + Soil + Genotype+Temp2:Genotype, MetaDataTrim2)
+
+# CLR transform
+x.glm <- aldex.clr(count_sub,mm, mc.samples = 128, denom = "all", verbose = TRUE)
+glm.test <- aldex.glm(x.glm, mm, fdr.method='holm')
+glm.eff<- aldex.glm.effect(x.glm)
+
+```
+```{r Make heat map}
+samples_keep <- intersect(colnames(count_mat), MetaDataTrim2$ID2)
+count_sub <- count_mat[, samples_keep, drop = FALSE]
+meta_sub  <- MetaDataTrim2 %>% filter(ID2 %in% samples_keep) %>%
+  arrange(match(ID2, colnames(count_sub)))
+rownames(meta_sub) <- meta_sub$ID2
+meta_sub$Group <- with(meta_sub, paste(Genotype, Soil, sep = "_"))
+groups <- unique(meta_sub$Group)
+group_results <- list()
+
+
+#g <- groups[1] 
+
+for (g in groups) {
+  # Subset samples in this group
+  samp_ids <- meta_sub$ID2[meta_sub$Group == g]
+
+  # Keep only samples present in count_sub
+  samp_ids <- intersect(samp_ids, colnames(count_sub))
+  if (length(samp_ids) == 0) next  # skip if no samples
+
+  count_g <- count_sub[, samp_ids, drop = FALSE]
+  meta_g  <- meta_sub[samp_ids, , drop = FALSE]
+
+  meta_g <- meta_sub[meta_sub$ID2 %in% samp_ids, , drop = FALSE]
+  
+  mm_g <- model.matrix(~ Temp2, data = meta_g)
+  
+  # Run ALDEx2 
+  x_g <- aldex.clr(count_g, mm_g, mc.samples = 136, denom = "all", verbose = FALSE)
+  
+  glm.test_g <- aldex.glm(x_g, mm_g, fdr.method='BH') 
+  
+  glm.eff_g <- aldex.glm.effect(x_g) 
+  # Extract Temp2 effect 
+  eff_df <- glm.eff_g[["Temp238C"]] %>%
+    as.data.frame() %>%
+    rownames_to_column("feature")
+  
+stats_df <- glm.test_g %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("feature") %>%
+  dplyr::select(
+    feature,
+    Temp2.Est  = !!sym("Temp238C:Est"),
+    Temp2.pval = !!sym("Temp238C:pval"),
+    Temp2.padj = !!sym("Temp238C:pval.padj")
+  )
+  
+merged <- left_join(eff_df, stats_df, by = "feature") %>%
+  dplyr::select(feature, diff.btw, Temp2.Est,Temp2.pval, Temp2.padj) %>%
+  dplyr::rename(
+    !!paste0(g, "_Est")  := Temp2.Est,
+    !!paste0(g, "_pval") := Temp2.pval,
+    !!paste0(g, "_padj") := Temp2.padj
+  )
+  
+  group_results[[g]] <- merged
+}
+
+merged_all <- Reduce(function(x, y) full_join(x, y, by = "feature"), group_results)
+
+# Grab the effect size (Est) columns
+lfc_mat <- merged_all %>%
+  dplyr::select(feature, ends_with("_Est"))
+
+# Grab padj columns
+padj_mat <- merged_all %>%
+  dplyr::select(feature, ends_with("_padj"))
+
+# Keep genes with padj < 0.05 in at least one group
+keep_genes <- apply(padj_mat[,-1], 1, function(x) any(x < 0.05, na.rm = TRUE))
+
+lfc_filtered <- lfc_mat[keep_genes, ]
+
+# Convert to matrix
+lfc_matrix1 <- as.matrix(lfc_filtered[,-1])
+rownames(lfc_matrix1) <- lfc_filtered$feature
+
+#Save Results:
+write.csv(lfc_matrix1,"ALDEx2Out_Temp.csv")
+
+desired_order <- c("CML52_Field_Est", "CML52_Autoclaved_Est",
+                   "CML103_Field_Est", "CML103_Autoclaved_Est",
+                   "SAP_Field_Est", "SAP_Autoclaved_Est")
+lfc_matrix1 <- lfc_matrix1[, intersect(desired_order, colnames(lfc_matrix1)), drop = FALSE]
+
+
+# -------------------
+# 5. Heatmap
+# -------------------
+
+pheatmap(
+  lfc_matrix1,
+  scale = "row",
+  clustering_method = "ward.D2",
+  clustering_distance_rows = "euclidean",
+  cluster_cols = FALSE,  
+  show_colnames = TRUE,
+  show_rownames = FALSE,
+  treeheight_col = 0,
+  fontsize_col = 10,
+  color = colorRampPalette(c("#3C1A42FF", "grey99", "#ED4E3EFF"))(50),
+  filename="../Figures/ALDEX2HeatMap_MicrobeGenes.tiff",width = 6,height = 10
+)
+
+
+```
+
+Import Collapsed Pathway information:
+```{r}
+GeneCounts<-read.csv("../AnnotationOutputs/GeneCounts/Microbe_Genes_collapsed_counts.csv")
+GeneCounts$AllSamples<-NULL
+# identify which columns are counts (everything except metadata)
+count_cols <- grep("emapper.annotations", colnames(GeneCounts), value = TRUE)
+
+sample_cols <- setdiff(colnames(GeneCounts), c("X","taxa2", "name", "desc"))
+
+setDT(GeneCounts)
+#Further combine genes that have same name/taxa
+#GeneCounts1 <- GeneCounts[, lapply(.SD, sum, na.rm = TRUE),
+#                        by = .(taxa2, name),
+#                        .SDcols = sample_cols]
+
+
+# filter: keep rows with at least 75 counts in >= 4 samples
+GeneCounts_filt <- GeneCounts1 %>%
+  filter(rowSums(across(all_of(count_cols), ~ .x >=250)) >= 4)
+
+#If including taxa info:
+GeneCounts_filt <- GeneCounts_filt %>%
+  mutate(Gene = paste(taxa2, name, sep = "-")) %>%
+  dplyr::select(Gene, everything())
+
+count_mat <- GeneCounts_filt %>%
+  dplyr::select(-Gene, -taxa2, -name,) %>%  # drop non-numeric metadata
+  mutate(across(everything(), as.numeric)) %>% 
+  as.matrix()
+
+rownames(count_mat) <- GeneCounts_filt$Gene
+
+#If looking at collapsed genes:
+#GeneCounts_filt$x<-NULL
+#count_mat <- GeneCounts_filt %>%
+#  select(-name) %>%  # drop non-numeric metadata
+#  mutate(across(everything(), as.numeric)) %>% 
+#  as.matrix()
+#rownames(count_mat) <- GeneCounts_filt$name
+
+colnames(count_mat)<- gsub("\\.emapper\\.annotations$","",colnames(count_mat))
+```
+
+
+Same type of thing, just using pathways:
+
+```{r}
+PathCounts<-read.csv("../AnnotationOutputs/GeneCounts/Microbe_Pathways_collapsed_EC_counts.csv")
+PathCounts$X<-NULL
+# identify which columns are counts (everything except metadata)
+count_cols <- grep("emapper.annotations", colnames(PathCounts), value = TRUE)
+
+sample_cols <- setdiff(colnames(PathCounts), c("pathway", "desc"))
+
+setDT(PathCounts)
+
+PathCounts_filt <- PathCounts %>%
+  filter(!grepl("cancer|disease|bile acid|Photosynthesis|Drug metabolism|Human", desc, ignore.case = TRUE))
+
+# filter: keep rows with at least 75 counts in >= 4 samples
+PathCounts_filt <- PathCounts_filt %>%
+  filter(rowSums(across(all_of(count_cols), ~ .x >=250)) >= 4)
+
+count_mat <- PathCounts_filt %>%
+  dplyr::select(-pathway, -desc,) %>%  # drop non-numeric metadata
+  mutate(across(everything(), as.numeric)) %>% 
+  as.matrix()
+
+rownames(count_mat) <- PathCounts_filt$desc
+
+#If looking at collapsed genes:
+#GeneCounts_filt$x<-NULL
+#count_mat <- GeneCounts_filt %>%
+#  select(-name) %>%  # drop non-numeric metadata
+#  mutate(across(everything(), as.numeric)) %>% 
+#  as.matrix()
+#rownames(count_mat) <- GeneCounts_filt$name
+
+colnames(count_mat)<- gsub("\\.emapper\\.annotations$","",colnames(count_mat))
+
+```
+
+Run AlDEx2
+```{r}
+# Keep only desired samples
+samples_keep <- MetaDataTrim$ID2[MetaDataTrim$Genotype != "BS"]
+count_sub <- count_mat[, samples_keep, drop = FALSE]
+meta_sub  <- MetaDataTrim %>%
+  filter(ID2 %in% samples_keep) %>%
+  arrange(match(ID2, colnames(count_sub))) %>%
+  as.data.frame()  # ensure data.frame
+rownames(meta_sub) <- meta_sub$ID2
+
+stopifnot(all(colnames(count_sub) == rownames(meta_sub)))
+
+# Make sure factors
+meta_sub$Genotype <- factor(meta_sub$Genotype)
+meta_sub$Soil     <- factor(meta_sub$Soil)
+meta_sub$Temp2    <- factor(meta_sub$Temp2)
+meta_sub$Genotype <- relevel(meta_sub$Genotype, ref = "SAP")   # CML103 as reference
+
+# Run ALDEx2 GLM with formula (no model.matrix!)
+full_mm <- model.matrix(~ Genotype + Soil + Temp2 + Temp2:Soil,
+                        data = meta_sub)
+
+x.glm <- aldex.clr(count_sub, full_mm, mc.samples = 228, denom = "all", verbose = TRUE)
+glm.test <- aldex.glm(x.glm, full_mm, fdr.method='BH')
+glm.eff  <- aldex.glm.effect(x.glm)
+
+# Calculate CML52 vs CML103 difference manually
+glm.test$`GenotypeCML52_vs_CML103:Est`  <- glm.test$`GenotypeCML52:Est` - glm.test$`GenotypeCML103:Est`
+glm.test$`GenotypeCML52_vs_CML103:SE`   <- sqrt(glm.test$`GenotypeCML52:SE`^2 + glm.test$`GenotypeCML103:SE`^2)
+glm.test$`GenotypeCML52_vs_CML103:pval` <- 2 * pnorm(-abs(glm.test$`GenotypeCML52_vs_CML103:Est` / glm.test$`GenotypeCML52_vs_CML103:SE`))
+
+
+
+
+# Subset columns for three-way interactions
+main_effect_cols <- c(
+  "GenotypeCML52:Est", "GenotypeCML103:Est","GenotypeCML52_vs_CML103:Est",
+  "SoilField:Est",
+  "Temp238C:Est",
+  "SoilField:Temp238C:Est")
+
+se_cols <- sub(":Est$", ":SE", main_effect_cols)
+p_cols  <- sub(":Est$", ":pval", main_effect_cols)
+
+
+
+
+# Top 10 pathways by min p-value across selected effects
+#glm.test$min_pval <- apply(glm.test[, p_cols], 1, min, na.rm = TRUE)
+#top10_idx <- order(glm.test$min_pval)[1:50]
+#top10 <- glm.test[top10_idx, ]
+
+glm.test$sum_abs_effect <- rowSums(abs(glm.test[, main_effect_cols]), na.rm = TRUE)
+
+# Pick top 15 features by total effect magnitude
+top_idx <- order(glm.test$sum_abs_effect, decreasing = TRUE)[1:16]
+top15 <- glm.test[top_idx, ]
+
+# Convert to long format
+plot_df <- top15 %>%
+  dplyr::select(all_of(c(main_effect_cols, se_cols))) %>%
+  mutate(Pathway = rownames(.)) %>%
+  pivot_longer(
+    cols = -Pathway,
+    names_to = c("Effect", ".value"),
+    names_pattern = "(.*):(Est|SE)"
+  )
+
+# Clean pathway names
+plot_df$Pathway <- sub(";.*$", "", plot_df$Pathway)
+
+# Set custom order for Effect
+plot_df$Effect <- factor(plot_df$Effect, levels = c(
+  "SoilField",
+  "Temp238C",
+  "GenotypeCML52",
+  "GenotypeCML103",
+  "GenotypeCML52_vs_CML103",
+  "SoilField:Temp238C"
+))
+
+
+# Plot
+ggplot(plot_df, aes(x = Est, y = reorder(Pathway, Est), fill = Effect)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(xmin = Est - SE, xmax = Est + SE),
+                position = position_dodge(width = 0.8), width = 0.2) +
+  labs(x = "Effect Size", y = "Pathway", fill = "Effect") +
+  theme_classic() +scale_fill_manual(values = c("#000004FF","#C63C74FF","#FECD90FF","#F9785DFF","#7C2382FF","#331067FF"))+
+  theme(axis.text.y = element_text(size = 13))
+ggsave("../Figures/ALDEX2Bar_MicrobePaths.pdf",width = 12,height=8)
+
+```
+

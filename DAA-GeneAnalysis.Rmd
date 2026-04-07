@@ -1,0 +1,631 @@
+---
+title: "DAA-GeneAnalysis"
+author: "Nate Korth"
+date: "2026-03-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "~/GERMsHeatStress/")
+
+library(tidyverse)
+library(readxl)
+library(compositions) # For CLR transformation
+library(vegan)
+library(reshape2)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(glmnet)
+library(caret)
+library(scales)
+library(taxize)
+library(rotl) # For Open Tree of Life
+library(dplyr)
+library(ggplot2)
+library(agricolae)
+```
+
+
+```{r load data}
+# Read and clean metadata
+meta_data <- read_excel("HotGERMs_SampleSelection.xlsx", sheet = "Sheet2") %>%
+  filter(Sequenced == "Yes", Genotype != "BS") %>%
+  mutate(
+    Biomass_Shoot = as.numeric(`Biomass(Shoot)`),
+    Species = if_else(Genotype == "SAP", "Sorghum", "Maize")
+  ) %>%
+  column_to_rownames("ID2")
+
+# Read plant expression data
+plant_counts <- read.csv("MaizeSorghumOrthologsNormalized.csv", row.names = 1)
+plant_pathway <- read.csv("PlantExpression_byKEGGPathway.csv", row.names = 1)
+rownames(plant_pathway) <- gsub(" - Zea mays \\(maize\\)", "", rownames(plant_pathway))
+
+# Filter Plant: keep genes with counts >= 250 in more than 3 samples
+plant_filtered <- plant_counts %>% 
+  select(where(is.numeric)) %>% 
+  filter(rowSums(. >= 250) > 3)
+
+# Load gene-to-pathway maps
+plant_gene_map <- read.csv("./PlantGene2Pathway.csv", stringsAsFactors = FALSE)
+microbe_map_A <- read.csv("./AnnotationOutputs/GeneCounts/MicrobeGene2PathwayA.csv")
+microbe_map_B <- read.csv("./AnnotationOutputs/GeneCounts/MicrobeGene2PathwayB.csv")
+
+# Function to safely rename long pathway descriptions
+simplify_pathways <- function(df) {
+  df %>%
+    mutate(desc_p = case_when(
+      str_detect(desc_p, "Biosynthesis of various antibiotics") ~ "Biosynthesis of antibiotics",
+      str_detect(desc_p, "Biosynthesis of various other secondary metabolites") ~ "Secondary metabolites biosynthesis A",
+      str_detect(desc_p, "Biosynthesis of various plant secondary metabolites") ~ "Secondary metabolites biosynthesis B",
+      str_detect(desc_p, "Biosynthesis of various alkaloids") ~ "Alkaloid Biosynthesis",
+      str_detect(desc_p, "Biosynthesis of 12-, 14- and 16-membered macrolides") ~ "Macrolides Biosynthesis",
+      TRUE ~ desc_p # Keep original if no match
+    )) %>%
+    # Create the clean gene_taxa identifier immediately
+    mutate(name2 = paste0(name, "_", taxa2))
+}
+
+microbe_map_A <- simplify_pathways(microbe_map_A)
+
+bacteria_counts <- read.csv("./AnnotationOutputs/GeneCounts/Microbe_Genes_counts.csv", row.names = 1)
+
+# Ensure unique rownames by combining gene name and taxa
+bacteria_counts$name2 <- paste0(bacteria_counts$name, "_", bacteria_counts$taxa2)
+rownames(bacteria_counts) <- make.unique(bacteria_counts$name2)
+
+# Keep only numeric columns for matrix operations
+bacteria_numeric <- bacteria_counts %>% select(where(is.numeric))
+
+# Sum counts for rows that share the same base name (ignoring .1, .2 suffixes)
+base_names <- sub("\\.\\d+$", "", rownames(bacteria_numeric))
+bacteria_summed <- rowsum(bacteria_numeric, group = base_names)
+
+# Split into two datasets based on filtering thresholds
+# 1. All pathways (>= 300 in > 3 samples)
+bact_all_filtered <- bacteria_summed %>% filter(rowSums(. >= 100) > 3)
+
+# 2. Focused DAA pathway threshold (>= 50 in > 3 samples)
+bact_daa_filtered <- bacteria_summed %>% filter(rowSums(. >= 50) > 3)
+
+# Apply CLR transformation (adding 1 as pseudocount)
+bact_all_clr <- as.data.frame(apply(bact_all_filtered + 1, 2, clr))
+bact_daa_clr <- as.data.frame(apply(bact_daa_filtered + 1, 2, clr))
+
+# Clean sample names in columns
+colnames(bact_all_clr) <- str_remove(colnames(bact_all_clr), "\\.emapper\\.annotations$")
+colnames(bact_daa_clr) <- str_remove(colnames(bact_daa_clr), "\\.emapper\\.annotations$")
+
+# Find common samples across Plant and Bacteria datasets
+common_cols <- intersect(colnames(plant_filtered), colnames(bact_daa_clr))
+
+# Subset to common columns and convert to matrices
+plant_raw <- as.matrix(plant_filtered[, common_cols])
+bact_all_raw <- as.matrix(bact_all_clr[, common_cols])
+bact_daa_raw <- as.matrix(bact_daa_clr[, common_cols])
+
+# Isolate specific DAA genes from the DAA matrix
+daa_gene_list <- read.csv("DAAGenes_EC.csv")
+daa_map <- microbe_map_A %>% filter(name %in% daa_gene_list$name)
+
+bact_daa_raw <- bact_daa_raw[rownames(bact_daa_raw) %in% daa_map$name2, ]
+
+# Create scaled matrices for distance/regression analyses (Mantel, PERMANOVA)
+# Unscaled matrices (plant_raw, bact_daa_raw) remain available for Networks/Random Forests
+plant_scaled <- scale(plant_raw, center = TRUE, scale = TRUE)
+bact_daa_scaled <- scale(bact_daa_raw, center = TRUE, scale = TRUE)
+bact_all_scaled <- scale(bact_all_raw, center = TRUE, scale = TRUE)
+
+# Quick validation check:
+cat("Plant Matrix Dimensions:", dim(plant_raw), "\n")
+cat("Microbe DAA Matrix Dimensions:", dim(bact_daa_raw), "\n")
+```
+
+```{r global tree}
+# Extract all unique raw taxa from the global dataset
+all_taxa_raw <- data.frame(row_info = rownames(bact_all_raw)) %>%
+  separate(row_info, into = c("Gene", "Taxon"), sep = "_", extra = "merge") %>%
+  mutate(CleanTaxon = trimws(str_to_lower(str_remove_all(Taxon, "[0-9_]")))) %>%
+  pull(CleanTaxon) %>%
+  unique()
+
+# Query NCBI for their Family rank
+# NOTE: If this times out due to NCBI limits, run it once, save it with saveRDS(), 
+# and load it back in subsequent runs.
+cat("Querying NCBI for global family ranks...\n")
+get_family_safe <- function(tax_string) {
+  Sys.sleep(0.4) # Pause for 400 milliseconds
+  
+  # tryCatch prevents the whole loop from crashing if one single microbe fails
+  tryCatch({
+    taxize::tax_name(sci = tax_string, get = "family", db = "ncbi", rows = 1)
+  }, error = function(e) {
+    # If a network error happens, return an NA row to keep the structure intact
+    data.frame(db = "ncbi", query = tax_string, family = NA, stringsAsFactors = FALSE)
+  })
+}
+
+# 2. Run the slow function over your list of taxa
+global_families_list <- lapply(all_taxa_raw, get_family_safe)
+
+# 3. Bind the results back into a single dataframe
+global_families <- bind_rows(global_families_list)
+
+cat("Finished querying NCBI!\n")
+
+#Number of families
+global_families %>%
+  filter(!is.na(family)) %>%
+  pull(family) %>%
+  n_distinct()
+
+#  Clean up the list of families (remove NAs and format)
+clean_global_families <- global_families %>%
+  filter(!is.na(family)) %>%
+  pull(family) %>%
+  str_to_title() %>%
+  unique()
+
+cat("Fetching full NCBI taxonomic lineages for", length(clean_global_families), "families...\n")
+
+bad_families <- c("amelidae", "orobanchaceae", "diapheromeridae", "lampyridae", "pseudococcidae", "proteidae", "bacillidae","nectriaceae", "saccharomycetaceae", "chaetomiaceae", "arthrodermataceae", "hypocreaceae", "sordariaceae", "debaryomycetaceae", "clavicipitaceae")
+
+clean_global_families <- clean_global_families[!tolower(clean_global_families) %in% bad_families]
+# Get the full lineage (Kingdom -> Phylum -> Class -> Order -> Family) for each
+# Note: This sends a batch query to NCBI. It may take 30-60 seconds.
+ncbi_class <- taxize::classification(clean_global_families, db = "ncbi")
+
+
+
+# 2. Check for any families that NCBI couldn't resolve (should be 0 since we validated them earlier)
+missing_class <- is.na(ncbi_class)
+if(any(missing_class)) {
+  cat("Warning: Could not fetch lineages for:", paste(names(ncbi_class)[missing_class], collapse=", "), "\n")
+  # Filter out the missing ones so the tree builder doesn't crash
+  ncbi_class <- ncbi_class[!missing_class]
+}
+
+# Convert the list of lineages into a taxonomic tree
+# This function calculates a distance matrix based on shared taxonomic ranks
+cat("Building taxonomic tree...\n")
+tax_tree <- taxize::class2tree(ncbi_class)
+
+# 4. Extract the 'phylo' object
+global_phylo <- tax_tree$phylo
+
+# 5. Save the tree to upload to iTOL
+ape::write.tree(global_phylo, file = "Global_Microbial_Families_NCBI.tre")
+cat("Success! Taxonomic tree saved to Global_Microbial_Families_NCBI.tre\n")
+
+# Quick check of the tree size
+cat("Number of tips on the new tree:", length(global_phylo$tip.label), "\n")
+```
+
+```{r differential correlations}
+# Ensure the column name matches your metadata (e.g., "Temperature")
+samples_28 <- rownames(meta_data)[meta_data$Temp == 28 & rownames(meta_data) %in% colnames(plant_raw)]
+samples_38 <- rownames(meta_data)[meta_data$Temp == 38 & rownames(meta_data) %in% colnames(plant_raw)]
+
+# Transpose the data matrices so genes are columns and samples are rows (required by cor())
+Plant_28 <- t(plant_raw[, samples_28])
+Microbe_28 <- t(bact_daa_raw[, samples_28])
+
+Plant_38 <- t(plant_raw[, samples_38])
+Microbe_38 <- t(bact_daa_raw[, samples_38])
+
+cat("28°C Samples n =", nrow(Plant_28), "| 38°C Samples n =", nrow(Plant_38), "\n")
+
+# Compute Spearman correlations
+cor_28 <- cor(Plant_28, Microbe_28, method = "spearman", use = "pairwise.complete.obs")
+cor_38 <- cor(Plant_38, Microbe_38, method = "spearman", use = "pairwise.complete.obs")
+
+# Melt to long format
+cor_28_df <- reshape2::melt(cor_28, varnames = c("PlantGene", "MicrobeGene"), value.name = "cor_28")
+cor_38_df <- reshape2::melt(cor_38, varnames = c("PlantGene", "MicrobeGene"), value.name = "cor_38")
+
+# Merge and compute Fisher z-transformed difference
+diff_cor_results <- full_join(cor_28_df, cor_38_df, by = c("PlantGene", "MicrobeGene")) %>%
+  mutate(
+    # Safety catch to prevent infinite Z-scores if correlation is perfectly 1 or -1
+    cor_28 = case_when(cor_28 >= 1 ~ 0.9999, cor_28 <= -1 ~ -0.9999, TRUE ~ cor_28),
+    cor_38 = case_when(cor_38 >= 1 ~ 0.9999, cor_38 <= -1 ~ -0.9999, TRUE ~ cor_38),
+    
+    z_28 = atanh(cor_28),  
+    z_38 = atanh(cor_38),
+    diff_z = z_38 - z_28,
+    se = sqrt(1 / (nrow(Plant_28) - 3) + 1 / (nrow(Plant_38) - 3)),
+    z_score = diff_z / se,
+    p_value = 2 * pnorm(-abs(z_score)),
+    FDR = p.adjust(p_value, method = "fdr")
+  )
+
+# Filter for significant differential correlations (FDR < 0.05)
+sig_diff <- diff_cor_results %>% filter(FDR < 0.05)
+
+cat("Found", nrow(sig_diff), "significant differential correlations between 28°C and 38°C.\n")
+```
+
+```{r collapse2family and count}
+# Aggregate the differential correlation values for each microbe gene
+daa_gene_stats <- sig_diff %>%
+  group_by(MicrobeGene) %>%
+  summarise(
+    # Average differential shift across all significant plant interactions for this gene
+    Mean_Diff_Z = mean(diff_z, na.rm = TRUE),
+    Sig_Edges = n() 
+  ) %>%
+  # Split the MicrobeGene name back into Gene and Taxon
+  separate(MicrobeGene, into = c("Gene", "Taxon"), sep = "_", extra = "merge") %>%
+  mutate(CleanTaxon = trimws(str_to_lower(str_remove_all(Taxon, "[0-9_]"))))
+
+# Map the taxa to their NCBI families (using global_families generated earlier)
+daa_family_stats <- daa_gene_stats %>%
+  left_join(global_families, by = c("CleanTaxon" = "query")) %>%
+  filter(!is.na(family)) %>%
+  mutate(Family = str_to_title(family))
+
+# Aggregate up to the Family level
+# If multiple taxa in the same family have the same gene, we average their correlation shifts
+daa_heatmap_data <- daa_family_stats %>%
+  group_by(Family, Gene) %>%
+  summarise(Plot_Value = mean(Mean_Diff_Z, na.rm = TRUE), .groups = "drop") %>%
+  # Pivot wider: Rows = Families (Tree Leaves), Columns = DAA Genes (Heatmap Boxes)
+  pivot_wider(names_from = Gene, values_from = Plot_Value)
+
+cat("Aggregated family-level heatmap data dimensions:", dim(daa_heatmap_data), "\n")
+
+# Optional: write to CSV
+# write.csv(final_family_summary, "DAA_FamilyLevel_DiffCor.csv", row.names = FALSE)
+```
+
+```{r generate itol annotation file}
+# 1. Categorize each significant gene as favoring 28C or 38C, then count them per family
+daa_bar_data <- daa_family_stats %>%
+  mutate(Favored_Temp = ifelse(Mean_Diff_Z > 0, "Stronger_at_38C", "Stronger_at_28C")) %>%
+  group_by(Family, Favored_Temp) %>%
+  summarise(Gene_Count = n(), .groups = "drop") %>%
+  # Pivot so we have columns for the 28C counts and 38C counts
+  pivot_wider(names_from = Favored_Temp, values_from = Gene_Count, values_fill = list(Gene_Count = 0))
+
+# Safety check: Ensure both columns exist just in case the data is heavily skewed
+if(!"Stronger_at_38C" %in% colnames(daa_bar_data)) daa_bar_data$Stronger_at_38C <- 0
+if(!"Stronger_at_28C" %in% colnames(daa_bar_data)) daa_bar_data$Stronger_at_28C <- 0
+
+# 2. Define the iTOL Multi-Bar Header
+itol_bar_header <- c(
+  "DATASET_MULTIBAR",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Significant_Gene_Counts",
+  "COLOR,#000000",
+  
+  # Define the labels and colors for the bars
+  "FIELD_LABELS,Stronger at 28C,Stronger at 38C",
+  "FIELD_COLORS,#3C1A42F,#ED4E3EF", # Blue for 28C, Red for 38C
+  
+  # iTOL specific multi-bar settings
+  "ALIGN_FIELDS,1",       # 1 = Start bars from the same baseline
+  "DATASET_SCALE,1",      # Show a numeric scale 
+  "MARGIN,5",             # Space between tree leaves and bars
+  
+  "DATA"
+)
+
+# 3. Format the data rows
+bar_lines <- apply(daa_bar_data, 1, function(row) {
+  # Paste Family, Count_28, Count_38
+  paste(row["Family"], row["Stronger_at_28C"], row["Stronger_at_38C"], sep = ",")
+})
+
+# 4. Export the file
+writeLines(c(itol_bar_header, bar_lines), "iTOL_DAA_MultiBar_Temp.txt")
+cat("Success! Bar chart annotation saved to iTOL_DAA_MultiBar_Temp.txt\n")
+```
+
+
+```{r labelTree2}
+#  Extract the 'Class' rank from the ncbi_class object
+cat("Extracting Class taxonomy for each family...\n")
+
+class_mapping <- lapply(names(ncbi_class), function(tax_name) {
+  tax_df <- ncbi_class[[tax_name]]
+  if (is.data.frame(tax_df)) {
+    class_row <- tax_df[tax_df$rank == "class", ]
+    if (nrow(class_row) > 0) {
+      return(data.frame(Family = tax_name, Class = str_to_title(class_row$name[1])))
+    }
+  }
+  return(data.frame(Family = tax_name, Class = "Unknown"))
+})
+
+class_df <- bind_rows(class_mapping) %>% mutate(Family = str_to_title(Family))
+
+# Assign the VIRIDIS color scale
+unique_classes <- unique(class_df$Class)
+# Base R natively supports viridis!
+class_colors <- setNames(hcl.colors(length(unique_classes), palette = "viridis"), unique_classes)
+
+# --- FILE 1: THE BRANCH COLORS ---
+itol_branch_header <- c(
+  "TREE_COLORS",
+  "SEPARATOR COMMA",
+  "DATA"
+)
+
+# Format: NODE_ID, TYPE, COLOR, STYLE, SIZE_FACTOR
+branch_lines <- apply(class_df, 1, function(row) {
+  paste(row["Family"], "branch", class_colors[row["Class"]], "normal", "2", sep = ",")
+})
+
+writeLines(c(itol_branch_header, branch_lines), "iTOL_Viridis_Branches.txt")
+
+
+# Extract the 'Class' rank (Same as before)
+class_mapping <- lapply(names(ncbi_class), function(tax_name) {
+  tax_df <- ncbi_class[[tax_name]]
+  if (is.data.frame(tax_df)) {
+    class_row <- tax_df[tax_df$rank == "class", ]
+    if (nrow(class_row) > 0) {
+      return(data.frame(Family = tax_name, Class = str_to_title(class_row$name[1])))
+    }
+  }
+  return(data.frame(Family = tax_name, Class = "Unknown"))
+})
+
+class_df <- bind_rows(class_mapping) %>% mutate(Family = str_to_title(Family))
+
+# Assign the VIRIDIS color scale for the font
+unique_classes <- unique(class_df$Class)
+class_colors <- setNames(hcl.colors(length(unique_classes), palette = "viridis"), unique_classes)
+
+# Create the iTOL TEXT DATASET header
+itol_text_header <- c(
+  "DATASET_TEXT",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Class_Names",
+  "COLOR,#000000",
+  
+  # iTOL Text Alignment Settings
+  "ALIGN_TO_LABELS,1",     # Aligns the text flush outside the tree
+  "LABEL_ROTATION,0",      # Keeps text readable (horizontal)
+  
+  "DATA"
+)
+
+# Format the data rows
+# iTOL Format: NODE_ID, LABEL_TEXT, POSITION, COLOR, STYLE, SIZE_FACTOR, ROTATION
+# We use POSITION = -1 (outside the tree), STYLE = 'bold', and SIZE = 1.5 to make it pop.
+text_lines <- apply(class_df, 1, function(row) {
+  fam <- row["Family"]
+  cls <- row["Class"]
+  hex_col <- class_colors[cls]
+  
+  paste(fam, cls, "-1", hex_col, "bold", "1.5", "0", sep = ",")
+})
+
+# Export the file
+writeLines(c(itol_text_header, text_lines), "iTOL_Class_Text.txt")
+cat("Success! Text label annotation saved to iTOL_Class_Text.txt\n")
+
+```
+
+
+
+```{r global_expression_activity}
+# Map all globally expressed genes to their taxonomic families
+#bact_all_df <- as.data.frame(bact_all_raw)
+
+#Let's look at just one microbiome treatment
+field_cols <- intersect(colnames(bact_all_raw), rownames(meta_data)[meta_data$Soil == "Field"])
+bact_all_df <- as.data.frame(bact_all_raw[, field_cols])
+bact_all_df$RowInfo <- rownames(bact_all_df)
+
+# Pivot long to easily parse out the taxonomy
+bact_all_long <- bact_all_df %>%
+  pivot_longer(cols = -RowInfo, names_to = "Sample", values_to = "CLR_Value") %>%
+  separate(RowInfo, into = c("Gene", "Taxon"), sep = "_", extra = "merge") %>%
+  mutate(CleanTaxon = trimws(str_to_lower(str_remove_all(Taxon, "[0-9_]"))))
+
+# Join with the global_families classification table
+family_expression <- bact_all_long %>%
+  left_join(global_families, by = c("CleanTaxon" = "query")) %>%
+  filter(!is.na(family)) %>%
+  mutate(Family = str_to_title(family))
+
+# 2. Aggregate expression at the family level
+# We take the mean CLR of all genes within a family for each sample to represent "Total Activity"
+family_sample_activity <- family_expression %>%
+  group_by(Family, Sample) %>%
+  summarise(
+    Family_Mean_CLR = mean(CLR_Value, na.rm = TRUE),
+    Total_Genes_Identified = n_distinct(Gene), 
+    .groups = "drop"
+  )
+
+# 3. Add temperature metadata and filter for our samples of interest
+family_sample_activity <- family_sample_activity %>%
+  mutate(Temp = case_when(
+    Sample %in% samples_38 ~ "38C",
+    Sample %in% samples_28 ~ "28C",
+    TRUE ~ "Other"
+  )) %>%
+  filter(Temp %in% c("28C", "38C"))
+
+# 4. Perform differential analysis (T-Test) for each family
+family_activity_stats <- family_sample_activity %>%
+  group_by(Family) %>%
+  # Safety catch: Ensure there are enough samples in both groups to run a t-test
+  filter(sum(Temp == "28C") >= 3 & sum(Temp == "38C") >= 3) %>%
+  summarise(
+    mean_28 = mean(Family_Mean_CLR[Temp == "28C"], na.rm = TRUE),
+    mean_38 = mean(Family_Mean_CLR[Temp == "38C"], na.rm = TRUE),
+    p_val = wilcox.test(Family_Mean_CLR[Temp == "38C"], Family_Mean_CLR[Temp == "28C"], exact = FALSE)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    diff = mean_38 - mean_28,
+    # Define enrichment status based on p < 0.05
+    Status = case_when(
+      p_val < 0.05 & diff > 0 ~ "Enriched_38C",
+      p_val < 0.05 & diff < 0 ~ "Enriched_28C",
+      TRUE ~ "No_Change"
+    )
+  )
+
+cat("--- Global Family Activity Shifts (p < 0.05) ---\n")
+print(table(family_activity_stats$Status))
+cat("----------------------------------------------\n")
+
+# 5. Generate iTOL Color Strip Annotation
+# Define colors: Red for 38C, Blue for 28C, Light Grey for No Change
+status_colors <- c(
+  "Enriched_38C" = "#F4815A",
+  "Enriched_28C" = "#5ACCAD",
+  "No_Change" = "gray80" 
+)
+
+itol_activity_header <- c(
+  "DATASET_COLORSTRIP",
+  "SEPARATOR COMMA",
+  "DATASET_LABEL,Global_Activity_Shift",
+  "COLOR,#000000",
+  "STRIP_WIDTH,30",        # Distinct thickness 
+  "COLOR_BRANCHES,0",
+  "SHOW_LABELS,0",         # Set to 0 so we just see the clean block of color
+  "DATA"
+)
+
+# Format the rows: Family, Hex Color, Text Label
+activity_lines <- apply(family_activity_stats, 1, function(row) {
+  fam <- row["Family"]
+  status <- row["Status"]
+  hex_col <- status_colors[status]
+  
+  # iTOL will ignore NA families automatically
+  if(!is.na(hex_col)) {
+    paste(fam, hex_col, status, sep = ",")
+  }
+})
+
+# Remove any empty rows
+activity_lines <- unlist(activity_lines)
+
+# Export the file
+writeLines(c(itol_activity_header, activity_lines), "iTOL_Global_Activity_ColorStrip.txt")
+cat("Success! Global activity color strip saved to iTOL_Global_Activity_ColorStrip.txt\n")
+```
+
+
+
+Make Violin plot from public data
+```{r}
+SuppTable<-read.csv("./LiteratureData/Knight_level4Models.csv")
+daaECs<-read.csv("./DAAGenes_EC.csv")
+
+
+flag_T <- grepl("\\(T\\)$", SuppTable$level4)
+# Extract EC numbers
+SuppTable$EC <- sub(".*\\(EC ([0-9\\.]+)\\).*", "\\1", SuppTable$level4)
+SuppTable$EC[!grepl("\\(EC", SuppTable$level4)] <- NA
+
+SuppTable$D_AA_pathway <- flag_T | (SuppTable$EC %in% daaECs$pathway_EC)
+
+# Survey all level1 categories (excluding our special D-AA genes)
+pathway_survey <- SuppTable %>%
+  filter(!is.na(level1) & D_AA_pathway == FALSE) %>%
+  group_by(level1) %>%
+  # Filter out categories with too few genes to run a t-test
+  filter(n() >= 3) %>% 
+  summarise(
+    N = n(),
+    Mean_Effect_H = mean(estimate_TreatmentH, na.rm = TRUE),
+    p_val = t.test(estimate_TreatmentH, mu = 0)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Significance = case_when(
+      p_val < 0.05 & Mean_Effect_H > 0 ~ "Increased (+)",
+      p_val < 0.05 & Mean_Effect_H < 0 ~ "Decreased (-)",
+      TRUE ~ "No Change (0)"
+    )
+  ) %>%
+  arrange(desc(Mean_Effect_H))
+
+plot_data <- SuppTable %>%
+  mutate(group = case_when(
+    D_AA_pathway == TRUE ~ "D-AA Pathway",
+    level1 == "Amino Acids and Derivatives" ~ "Amino Acids and Derivatives",
+    level1 == "Carbohydrates" ~ "Carbohydrates",
+    level1 == "Dormancy and Sporulation" ~ "Dormancy and Sporulation",
+    TRUE ~ NA_character_
+  )) %>%
+  filter(!is.na(group))
+
+# Define the exact target order we want left-to-right
+target_order <- c("D-AA Pathway", 
+                  "Amino Acids and Derivatives", 
+                  "Carbohydrates",
+                  "Dormancy and Sporulation")
+
+# Apply factor to group for the ANOVA and Fill Colors
+plot_data$group <- factor(plot_data$group, levels = target_order)
+
+anova_model <- aov(estimate_TreatmentH ~ group, data = plot_data)
+
+# Run Fisher's LSD
+lsd_results <- LSD.test(anova_model, "group", group = TRUE)
+
+# Extract letters
+letters_df <- data.frame(
+  group = as.character(rownames(lsd_results$groups)),
+  Letter = as.character(lsd_results$groups$groups),
+  stringsAsFactors = FALSE
+)
+
+# Calculate N and Max Y, join letters
+letter_placement_df <- plot_data %>%
+  group_by(group) %>%
+  summarise(
+    N = n(),
+    Max_Y = max(estimate_TreatmentH, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(letters_df, by = "group") %>%
+  mutate(
+    New_Label = paste0(group, "\n(n = ", N, ")")
+  )
+
+# ---> BULLETPROOF X-AXIS ORDERING <---
+# Force the summary dataframe to sort exactly by our target_order
+letter_placement_df <- letter_placement_df %>%
+  mutate(group = factor(group, levels = target_order)) %>%
+  arrange(group)
+
+# Join the newly generated labels back to the main data
+plot_data <- plot_data %>%
+  left_join(select(letter_placement_df, group, New_Label), by = "group")
+
+# Lock in the X-axis levels using the perfectly sorted letter_placement_df
+plot_data$New_Label <- factor(plot_data$New_Label, levels = letter_placement_df$New_Label)
+
+y_offset <- max(letter_placement_df$Max_Y, na.rm = TRUE) * 0.08 
+
+# Generate the plot
+ggplot(plot_data, aes(x = New_Label, y = estimate_TreatmentH, fill = group)) +
+  geom_violin(trim = FALSE) +
+  theme_classic() +
+  geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) + 
+  scale_fill_manual(values = c("#f9785d", "#7c2382ff","#331067","#fecd90ff")) +
+  labs(x = NULL,
+       y = "Heat Stress Effect") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none", 
+        text = element_text(size = 18, family = "sans")) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.8) +
+  geom_text(data = letter_placement_df, 
+            aes(x = New_Label, y = Max_Y + y_offset, label = Letter), 
+            size = 7, fontface = "bold", inherit.aes = FALSE)
+
+ggsave("./Figures/DistributionofHeatStressEffectFromNatureSoil2.pdf",width=5,height=7)
+```
