@@ -814,6 +814,14 @@ Elastic Net Regression (Biomass & Heat Stress Prediction)
 Random Forest analysis (Biomass & Heat Stress Prediction)
 Combination of Outputs to select important features
 ```
+## D-AminoAcidGeneAnalysis
+```
+Pull genes annotated as being part of DAA metabolism
+Differential correlation analysis (on specific genes) between Temperatures
+Pull the taxanomic information from all EggNOG annotated taxa from NCBI and collapse at family level
+build itol annotation files
+generate violin plots from publically avalible data Knight et. al. 2024
+```
 # Misc code
 ## Make table of orthologous genes and scan list of candidate genes for orthologs: 
 ```
